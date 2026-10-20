@@ -4,21 +4,35 @@ import {
   signOut, 
   onAuthStateChanged 
 } from 'firebase/auth';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { 
+  doc, 
+  getDoc, 
+  updateDoc, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  runTransaction 
+} from 'firebase/firestore';
 import { auth, db } from './firebase';
 
 export default function App() {
   const [user, setUser] = useState(null);
-  const [currentUserId, setCurrentUserId] = useState('');
   const [loading, setLoading] = useState(true);
 
+  // 현재 메뉴 탭: 'game' | 'shop' | 'transfer'
+  const [activeTab, setActiveTab] = useState('game');
+
+  // 로그인 입력값
   const [inputId, setInputId] = useState('');
   const [inputPw, setInputPw] = useState('');
 
+  // 유저 데이터
   const [gold, setGold] = useState(1000);
   const [remainingGames, setRemainingGames] = useState(5);
-  const maxGames = 5;
+  const [inventory, setInventory] = useState([]);
 
+  // 동전 던지기 상태
   const [selectedChoice, setSelectedChoice] = useState('front');
   const [betAmount, setBetAmount] = useState(100);
   const [isFlipping, setIsFlipping] = useState(false);
@@ -26,18 +40,32 @@ export default function App() {
   const [resultMessage, setResultMessage] = useState('');
   const [resultType, setResultType] = useState('');
 
-  // 로그인 상태 감지 및 DB 데이터 불러오기
+  // 양도 서브 탭: 'gold' | 'item'
+  const [transferType, setTransferType] = useState('gold');
+
+  // 골드 양도 상태
+  const [targetUserId, setTargetUserId] = useState('');
+  const [transferAmount, setTransferAmount] = useState(100);
+
+  // 아이템 양도 상태
+  const [targetItemUserId, setTargetItemUserId] = useState('');
+  const [selectedItemToTransfer, setSelectedItemToTransfer] = useState('');
+
+  // 상점 아이템 목록
+  const shopItems = [
+    { id: 'item_01', name: '철릭', price: 500, desc: '전통 무관의 멋진 의복입니다.' },
+    { id: 'item_02', name: '쌍륙 판', price: 1200, desc: '전통 보드게임용 판입니다.' },
+    { id: 'item_03', name: '손전등', price: 300, desc: '어두운 곳을 밝히는 도구입니다.' },
+  ];
+
+  // 한글 아이디를 이메일 형식으로 변환
+  const getFakeEmail = (id) => `${encodeURIComponent(id.trim())}@mygame.com`;
+
+  // 로그인 상태 감지 및 DB 조회
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         setUser(currentUser);
-        
-        // 1순위: 입력했던 아이디가 있으면 우선 사용
-        if (inputId) {
-          setCurrentUserId(inputId);
-        }
-
-        // 2순위: 데이터베이스(Firestore)에서 userId 가져오기
         try {
           const userDocRef = doc(db, 'users', currentUser.uid);
           const userDoc = await getDoc(userDocRef);
@@ -45,24 +73,20 @@ export default function App() {
             const data = userDoc.data();
             setGold(data.gold ?? 1000);
             setRemainingGames(data.remainingGames ?? 5);
-            if (data.userId) {
-              setCurrentUserId(data.userId);
-            }
+            setInventory(data.inventory ?? []);
           }
         } catch (error) {
-          console.error("데이터 불러오기 실패:", error);
+          console.error("데이터 불러오기 에러:", error);
         }
       } else {
         setUser(null);
-        setCurrentUserId('');
       }
       setLoading(false);
     });
     return () => unsubscribe();
-  }, [inputId]);
+  }, []);
 
-  const getFakeEmail = (id) => `${id.trim()}@mygame.com`;
-
+  // 로그인 처리
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
     if (!inputId || !inputPw) {
@@ -74,26 +98,26 @@ export default function App() {
 
     try {
       await signInWithEmailAndPassword(auth, fakeEmail, inputPw);
-      setCurrentUserId(inputId); // 로그인 직후 아이디 확실하게 고정
     } catch (error) {
       alert('로그인 실패: 등록되지 않은 아이디이거나 비밀번호가 틀렸습니다.');
     }
   };
 
+  // 로그아웃
   const handleLogout = async () => {
     await signOut(auth);
     setInputId('');
     setInputPw('');
-    setCurrentUserId('');
   };
 
+  // 동전 던지기 게임 로직
   const handleFlipCoin = async () => {
     if (remainingGames <= 0) {
       alert('오늘 남은 게임 횟수가 없습니다!');
       return;
     }
     if (betAmount <= 0 || betAmount > gold) {
-      alert('베팅 금액을 다시 확인해 주세요. 보유 골드보다 높거나 0 이하일 수 없습니다.');
+      alert('베팅 금액을 다시 확인해 주세요.');
       return;
     }
 
@@ -112,11 +136,11 @@ export default function App() {
       if (isWin) {
         const winGold = betAmount;
         newGold += winGold * 2;
-        setResultMessage(`축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`);
+        setResultMessage(`🎉 축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`);
         setResultType('win');
       } else {
         newGold -= betAmount;
-        setResultMessage(`아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`);
+        setResultMessage(`💀 아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`);
         setResultType('lose');
       }
 
@@ -136,6 +160,167 @@ export default function App() {
     }, 800);
   };
 
+  // 아이템 구매 로직
+  const handleBuyItem = async (item) => {
+    if (gold < item.price) {
+      alert('골드가 부족합니다!');
+      return;
+    }
+
+    if (inventory.includes(item.name)) {
+      alert('이미 보유하고 있는 아이템입니다.');
+      return;
+    }
+
+    const newGold = gold - item.price;
+    const newInventory = [...inventory, item.name];
+
+    setGold(newGold);
+    setInventory(newInventory);
+
+    if (user) {
+      const userDocRef = doc(db, 'users', user.uid);
+      await updateDoc(userDocRef, {
+        gold: newGold,
+        inventory: newInventory,
+      });
+      alert(`[${item.name}]을(를) 성공적으로 구매하셨습니다!`);
+    }
+  };
+
+  // 골드 양도(송금) 로직
+  const handleTransferGold = async (e) => {
+    e.preventDefault();
+    const cleanTargetId = targetUserId.trim();
+
+    if (!cleanTargetId) {
+      alert('상대방 아이디를 입력해주세요.');
+      return;
+    }
+
+    const currentDisplayId = user && user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+    if (cleanTargetId === currentDisplayId) {
+      alert('본인 계정으로는 골드를 보낼 수 없습니다.');
+      return;
+    }
+
+    if (transferAmount <= 0 || transferAmount > gold) {
+      alert('양도할 골드 수량을 다시 확인해주세요.');
+      return;
+    }
+
+    try {
+      const q = query(collection(db, 'users'), where('userId', '==', cleanTargetId));
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        alert('존재하지 않는 상대방 아이디입니다.');
+        return;
+      }
+
+      const targetDoc = querySnapshot.docs[0];
+      const targetDocRef = targetDoc.ref;
+      const myDocRef = doc(db, 'users', user.uid);
+
+      await runTransaction(db, async (transaction) => {
+        const myDoc = await transaction.get(myDocRef);
+        if (!myDoc.exists()) throw new Error("내 계정 정보를 찾을 수 없습니다.");
+
+        const myData = myDoc.data();
+        if ((myData.gold ?? 0) < transferAmount) {
+          throw new Error("골드가 부족합니다.");
+        }
+
+        const targetData = targetDoc.data();
+        const newMyGold = (myData.gold ?? 0) - transferAmount;
+        const newTargetGold = (targetData.gold ?? 0) + transferAmount;
+
+        transaction.update(myDocRef, { gold: newMyGold });
+        transaction.update(targetDocRef, { gold: newTargetGold });
+
+        setGold(newMyGold);
+      });
+
+      alert(`[${cleanTargetId}] 님에게 ${transferAmount.toLocaleString()} G를 성공적으로 전달했습니다!`);
+      setTargetUserId('');
+    } catch (error) {
+      console.error("골드 양도 실패:", error);
+      alert(`골드 양도 실패: ${error.message}`);
+    }
+  };
+
+  // 아이템 양도 로직
+  const handleTransferItem = async (e) => {
+    e.preventDefault();
+    const cleanTargetId = targetItemUserId.trim();
+
+    if (!cleanTargetId) {
+      alert('상대방 아이디를 입력해주세요.');
+      return;
+    }
+
+    if (!selectedItemToTransfer) {
+      alert('양도할 아이템을 선택해주세요.');
+      return;
+    }
+
+    const currentDisplayId = user && user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+    if (cleanTargetId === currentDisplayId) {
+      alert('본인 계정으로는 아이템을 보낼 수 없습니다.');
+      return;
+    }
+
+    try {
+      const q = query(collection(db, 'users'), where('userId', '==', cleanTargetId));
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        alert('존재하지 않는 상대방 아이디입니다.');
+        return;
+      }
+
+      const targetDoc = querySnapshot.docs[0];
+      const targetDocRef = targetDoc.ref;
+      const myDocRef = doc(db, 'users', user.uid);
+
+      await runTransaction(db, async (transaction) => {
+        const myDoc = await transaction.get(myDocRef);
+        if (!myDoc.exists()) throw new Error("내 계정 정보를 찾을 수 없습니다.");
+
+        const myData = myDoc.data();
+        const myInv = myData.inventory ?? [];
+
+        if (!myInv.includes(selectedItemToTransfer)) {
+          throw new Error("보유하지 않은 아이템입니다.");
+        }
+
+        const targetData = targetDoc.data();
+        const targetInv = targetData.inventory ?? [];
+
+        // 내 인벤토리에서 제거
+        const newMyInv = myInv.filter(item => item !== selectedItemToTransfer);
+        // 상대방 인벤토리에 추가 (중복 방지)
+        const newTargetInv = targetInv.includes(selectedItemToTransfer) 
+          ? targetInv 
+          : [...targetInv, selectedItemToTransfer];
+
+        transaction.update(myDocRef, { inventory: newMyInv });
+        transaction.update(targetDocRef, { inventory: newTargetInv });
+
+        setInventory(newMyInv);
+      });
+
+      alert(`[${cleanTargetId}] 님에게 [${selectedItemToTransfer}] 아이템을 전달했습니다!`);
+      setTargetItemUserId('');
+      setSelectedItemToTransfer('');
+    } catch (error) {
+      console.error("아이템 양도 실패:", error);
+      alert(`아이템 양도 실패: ${error.message}`);
+    }
+  };
+
+  const displayUserId = user && user.email ? decodeURIComponent(user.email.split('@')[0]) : '플레이어';
+
   if (loading) {
     return <div style={{ color: '#fff', textAlign: 'center', marginTop: '50px' }}>로딩 중...</div>;
   }
@@ -154,7 +339,7 @@ export default function App() {
               <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>아이디</label>
               <input
                 type="text"
-                placeholder="아이디 입력"
+                placeholder="아이디 입력 (한글 가능)"
                 value={inputId}
                 onChange={(e) => setInputId(e.target.value)}
                 style={styles.input}
@@ -180,118 +365,280 @@ export default function App() {
     );
   }
 
-  // 게임 화면
+  // 로그인 후 메인 화면
   return (
     <div style={styles.container}>
+      {/* 상단 프로필 영역 */}
       <div style={{ width: '100%', maxWidth: '380px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
         <span style={{ fontSize: '13px', color: '#94A3B8' }}>
-          접속 계정: <strong style={{ color: '#FBBF24' }}>{currentUserId || user.email.split('@')[0]}</strong>
+          접속 계정: <strong style={{ color: '#FBBF24' }}>{displayUserId}</strong>
         </span>
         <button onClick={handleLogout} style={styles.logoutBtn}>로그아웃</button>
       </div>
 
-      <div style={styles.header}>
-        <span style={{ fontSize: '28px' }}>🎲</span>
-        <h1 style={styles.title}>카지노</h1>
-      </div>
-      <p style={styles.subtitle}>오늘의 운세는?</p>
-
+      {/* 보유 골드 & 인벤토리 대시보드 */}
       <div style={styles.dashboardCard}>
         <div style={styles.goldText}>
           보유 골드: <span style={{ color: '#FBBF24', fontSize: '22px', fontWeight: 'bold' }}>{gold.toLocaleString()} G</span>
         </div>
-        <div style={styles.gridRow}>
-          <div style={styles.gridItem}>
-            <div style={{ color: '#34D399', fontSize: '20px', fontWeight: 'bold' }}>{remainingGames}</div>
-            <div style={styles.subText}>남은 게임 횟수</div>
-          </div>
-          <div style={styles.gridItem}>
-            <div style={{ color: '#9CA3AF', fontSize: '20px', fontWeight: 'bold' }}>{maxGames}</div>
-            <div style={styles.subText}>일일 최대 게임</div>
-          </div>
+        <div style={{ fontSize: '12px', color: '#A78BFA', marginTop: '6px' }}>
+          🎒 보유 아이템: {inventory.length > 0 ? inventory.join(', ') : '없음'}
         </div>
       </div>
 
-      <div style={styles.gameCard}>
-        <div style={styles.gameTitle}>[ 동전 던지기 ]</div>
-
-        <div style={{
-          ...styles.coinCircle,
-          transform: isFlipping ? 'rotateY(720deg)' : 'none',
-          transition: 'transform 0.8s ease-in-out'
-        }}>
-          {currentCoinDisplay === 'FRONT' ? '☀️' : '🌙'}
-        </div>
-
-        <p style={styles.subText}>선택하세요</p>
-        <div style={styles.buttonGroup}>
-          <button
-            onClick={() => { setSelectedChoice('front'); setCurrentCoinDisplay('FRONT'); }}
-            style={{
-              ...styles.choiceBtn,
-              backgroundColor: selectedChoice === 'front' ? '#7C3AED' : '#374151',
-              borderColor: selectedChoice === 'front' ? '#A78BFA' : 'transparent',
-            }}
-          >
-            ☀️ 앞면 (해)
-          </button>
-          <button
-            onClick={() => { setSelectedChoice('back'); setCurrentCoinDisplay('BACK'); }}
-            style={{
-              ...styles.choiceBtn,
-              backgroundColor: selectedChoice === 'back' ? '#7C3AED' : '#374151',
-              borderColor: selectedChoice === 'back' ? '#A78BFA' : 'transparent',
-            }}
-          >
-            🌙 뒷면 (달)
-          </button>
-        </div>
-
-        <div style={{ width: '100%', marginBottom: '16px' }}>
-          <label style={{ display: 'block', fontSize: '12px', color: '#9CA3AF', marginBottom: '6px' }}>베팅 금액</label>
-          <input
-            type="number"
-            value={betAmount}
-            onChange={(e) => setBetAmount(Number(e.target.value))}
-            style={styles.input}
-          />
-          <p style={{ textAlign: 'center', fontSize: '13px', color: '#C4B5FD', marginTop: '8px' }}>
-            승리 시 획득: <strong style={{ color: '#FBBF24' }}>{(betAmount * 2).toLocaleString()}</strong> 골드
-          </p>
-        </div>
-
+      {/* 메뉴 탭 */}
+      <div style={styles.tabGroup}>
         <button
-          onClick={handleFlipCoin}
-          disabled={isFlipping || remainingGames <= 0}
+          onClick={() => setActiveTab('game')}
           style={{
-            ...styles.actionBtn,
-            opacity: (isFlipping || remainingGames <= 0) ? 0.5 : 1,
-            cursor: (isFlipping || remainingGames <= 0) ? 'not-allowed' : 'pointer',
+            ...styles.tabBtn,
+            backgroundColor: activeTab === 'game' ? '#7C3AED' : '#1E293B',
+            color: activeTab === 'game' ? '#FFFFFF' : '#94A3B8',
           }}
         >
-          {isFlipping ? '동전 던지는 중...' : '동전 던지기!'}
+          🎲 게임
         </button>
-
-        {resultMessage && (
-          <div style={{
-            ...styles.resultBox,
-            borderColor: resultType === 'win' ? '#10B981' : '#EF4444',
-            color: resultType === 'win' ? '#6EE7B7' : '#FCA5A5'
-          }}>
-            {resultMessage}
-          </div>
-        )}
-
-        <div style={styles.ruleBox}>
-          <h4 style={{ margin: '0 0 8px 0', color: '#E5E7EB', fontSize: '13px' }}>게임 규칙</h4>
-          <ul style={{ margin: 0, paddingLeft: '18px', color: '#9CA3AF', fontSize: '12px', lineHeight: '1.6' }}>
-            <li>앞면(☀️) 또는 뒷면(🌙)을 선택하세요.</li>
-            <li>맞추면 베팅 금액의 2배를 획득합니다.</li>
-            <li>틀리면 베팅 금액을 잃습니다.</li>
-            <li>하루에 최대 5번까지 플레이 가능합니다.</li>
-          </ul>
-        </div>
+        <button
+          onClick={() => setActiveTab('shop')}
+          style={{
+            ...styles.tabBtn,
+            backgroundColor: activeTab === 'shop' ? '#7C3AED' : '#1E293B',
+            color: activeTab === 'shop' ? '#FFFFFF' : '#94A3B8',
+          }}
+        >
+          🛒 상점
+        </button>
+        <button
+          onClick={() => setActiveTab('transfer')}
+          style={{
+            ...styles.tabBtn,
+            backgroundColor: activeTab === 'transfer' ? '#7C3AED' : '#1E293B',
+            color: activeTab === 'transfer' ? '#FFFFFF' : '#94A3B8',
+          }}
+        >
+          💸 양도
+        </button>
       </div>
+
+      {/* TAB 1: 게임 */}
+      {activeTab === 'game' && (
+        <div style={styles.gameCard}>
+          <div style={styles.gameTitle}>[ 동전 던지기 ]</div>
+
+          <div style={{
+            ...styles.coinCircle,
+            transform: isFlipping ? 'rotateY(720deg)' : 'none',
+            transition: 'transform 0.8s ease-in-out'
+          }}>
+            {currentCoinDisplay === 'FRONT' ? '☀️' : '🌙'}
+          </div>
+
+          <p style={styles.subText}>선택하세요</p>
+          <div style={styles.buttonGroup}>
+            <button
+              onClick={() => { setSelectedChoice('front'); setCurrentCoinDisplay('FRONT'); }}
+              style={{
+                ...styles.choiceBtn,
+                backgroundColor: selectedChoice === 'front' ? '#7C3AED' : '#374151',
+                borderColor: selectedChoice === 'front' ? '#A78BFA' : 'transparent',
+              }}
+            >
+              ☀️ 앞면 (해)
+            </button>
+            <button
+              onClick={() => { setSelectedChoice('back'); setCurrentCoinDisplay('BACK'); }}
+              style={{
+                ...styles.choiceBtn,
+                backgroundColor: selectedChoice === 'back' ? '#7C3AED' : '#374151',
+                borderColor: selectedChoice === 'back' ? '#A78BFA' : 'transparent',
+              }}
+            >
+              🌙 뒷면 (달)
+            </button>
+          </div>
+
+          <div style={{ width: '100%', marginBottom: '16px' }}>
+            <label style={{ display: 'block', fontSize: '12px', color: '#9CA3AF', marginBottom: '6px' }}>베팅 금액</label>
+            <input
+              type="number"
+              value={betAmount}
+              onChange={(e) => setBetAmount(Number(e.target.value))}
+              style={styles.input}
+            />
+          </div>
+
+          <button
+            onClick={handleFlipCoin}
+            disabled={isFlipping || remainingGames <= 0}
+            style={{
+              ...styles.actionBtn,
+              opacity: (isFlipping || remainingGames <= 0) ? 0.5 : 1,
+            }}
+          >
+            {isFlipping ? '동전 던지는 중...' : '동전 던지기!'}
+          </button>
+
+          {resultMessage && (
+            <div style={{
+              ...styles.resultBox,
+              borderColor: resultType === 'win' ? '#10B981' : '#EF4444',
+              color: resultType === 'win' ? '#6EE7B7' : '#FCA5A5'
+            }}>
+              {resultMessage}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 2: 상점 */}
+      {activeTab === 'shop' && (
+        <div style={styles.gameCard}>
+          <div style={styles.gameTitle}>[ 아이템 상점 ]</div>
+          <p style={styles.subText}>골드를 사용하여 필요한 아이템을 구매하세요</p>
+
+          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '12px' }}>
+            {shopItems.map((item) => {
+              const isBought = inventory.includes(item.name);
+              return (
+                <div key={item.id} style={styles.itemCard}>
+                  <div>
+                    <div style={{ fontWeight: 'bold', fontSize: '15px' }}>{item.name}</div>
+                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{item.desc}</div>
+                    <div style={{ fontSize: '13px', color: '#FBBF24', fontWeight: 'bold', marginTop: '4px' }}>
+                      {item.price.toLocaleString()} G
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleBuyItem(item)}
+                    disabled={isBought}
+                    style={{
+                      ...styles.buyBtn,
+                      backgroundColor: isBought ? '#475569' : '#10B981',
+                      cursor: isBought ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {isBought ? '구매완료' : '구매'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: 양도 (골드 & 아이템 양도 서브탭 포함) */}
+      {activeTab === 'transfer' && (
+        <div style={styles.gameCard}>
+          <div style={styles.gameTitle}>[ 양도 센터 ]</div>
+
+          {/* 양도종류 선택 서브탭 */}
+          <div style={{ display: 'flex', gap: '6px', width: '100%', marginBottom: '16px' }}>
+            <button
+              onClick={() => setTransferType('gold')}
+              style={{
+                ...styles.subTabBtn,
+                backgroundColor: transferType === 'gold' ? '#3B82F6' : '#0F172A',
+                color: transferType === 'gold' ? '#FFFFFF' : '#94A3B8',
+              }}
+            >
+              💰 골드 양도
+            </button>
+            <button
+              onClick={() => setTransferType('item')}
+              style={{
+                ...styles.subTabBtn,
+                backgroundColor: transferType === 'item' ? '#3B82F6' : '#0F172A',
+                color: transferType === 'item' ? '#FFFFFF' : '#94A3B8',
+              }}
+            >
+              🎒 아이템 양도
+            </button>
+          </div>
+
+          {/* 골드 양도 폼 */}
+          {transferType === 'gold' && (
+            <form onSubmit={handleTransferGold} style={{ width: '100%' }}>
+              <div style={{ marginBottom: '14px', textAlign: 'left' }}>
+                <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>받는 플레이어 아이디</label>
+                <input
+                  type="text"
+                  placeholder="상대방 아이디 입력"
+                  value={targetUserId}
+                  onChange={(e) => setTargetUserId(e.target.value)}
+                  style={styles.input}
+                />
+              </div>
+
+              <div style={{ marginBottom: '20px', textAlign: 'left' }}>
+                <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>보낼 골드 수량</label>
+                <input
+                  type="number"
+                  value={transferAmount}
+                  onChange={(e) => setTransferAmount(Number(e.target.value))}
+                  style={styles.input}
+                />
+              </div>
+
+              <button type="submit" style={styles.actionBtn}>
+                골드 전달하기
+              </button>
+            </form>
+          )}
+
+          {/* 아이템 양도 폼 */}
+          {transferType === 'item' && (
+            <form onSubmit={handleTransferItem} style={{ width: '100%' }}>
+              <div style={{ marginBottom: '14px', textAlign: 'left' }}>
+                <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>받는 플레이어 아이디</label>
+                <input
+                  type="text"
+                  placeholder="상대방 아이디 입력"
+                  value={targetItemUserId}
+                  onChange={(e) => setTargetItemUserId(e.target.value)}
+                  style={styles.input}
+                />
+              </div>
+
+              <div style={{ marginBottom: '20px', textAlign: 'left' }}>
+                <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>보낼 아이템 선택</label>
+                {inventory.length > 0 ? (
+                  <select
+                    value={selectedItemToTransfer}
+                    onChange={(e) => setSelectedItemToTransfer(e.target.value)}
+                    style={{
+                      ...styles.input,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <option value="">-- 아이템을 선택하세요 --</option>
+                    {inventory.map((itemName, index) => (
+                      <option key={index} value={itemName}>
+                        {itemName}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p style={{ fontSize: '12px', color: '#EF4444', textAlign: 'center', margin: '8px 0' }}>
+                    보유 중인 아이템이 없습니다.
+                  </p>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={inventory.length === 0}
+                style={{
+                  ...styles.actionBtn,
+                  opacity: inventory.length === 0 ? 0.5 : 1,
+                  cursor: inventory.length === 0 ? 'not-allowed' : 'pointer',
+                }}
+              >
+                아이템 전달하기
+              </button>
+            </form>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -307,55 +654,66 @@ const styles = {
     padding: '24px 16px',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   },
-  header: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' },
-  title: { fontSize: '28px', fontWeight: 'bold', margin: 0 },
-  subtitle: { color: '#94A3B8', fontSize: '14px', marginBottom: '20px' },
   dashboardCard: {
     width: '100%', maxWidth: '380px', backgroundColor: '#1E293B',
-    borderRadius: '16px', padding: '20px', marginBottom: '20px',
+    borderRadius: '16px', padding: '16px', marginBottom: '16px',
     border: '1px solid #334155', textAlign: 'center', boxSizing: 'border-box',
   },
-  goldText: { fontSize: '18px', marginBottom: '16px' },
-  gridRow: { display: 'flex', borderTop: '1px solid #334155', paddingTop: '12px' },
-  gridItem: { flex: 1 },
-  subText: { fontSize: '12px', color: '#94A3B8' },
+  goldText: { fontSize: '16px' },
+  tabGroup: {
+    display: 'flex', gap: '8px', width: '100%', maxWidth: '380px', marginBottom: '16px',
+  },
+  tabBtn: {
+    flex: 1, padding: '10px 0', borderRadius: '10px', border: '1px solid #334155',
+    fontWeight: 'bold', fontSize: '13px', cursor: 'pointer',
+  },
+  subTabBtn: {
+    flex: 1, padding: '8px 0', borderRadius: '8px', border: '1px solid #334155',
+    fontWeight: 'bold', fontSize: '12px', cursor: 'pointer',
+  },
   gameCard: {
     width: '100%', maxWidth: '380px', backgroundColor: '#1E293B',
     borderRadius: '16px', padding: '24px', border: '1px solid #334155',
     display: 'flex', flexDirection: 'column', alignItems: 'center', boxSizing: 'border-box',
   },
-  gameTitle: { fontSize: '18px', fontWeight: 'bold', marginBottom: '20px' },
+  gameTitle: { fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' },
+  subText: { fontSize: '12px', color: '#94A3B8' },
   coinCircle: {
-    width: '90px', height: '90px', borderRadius: '50%', backgroundColor: '#F59E0B',
+    width: '80px', height: '80px', borderRadius: '50%', backgroundColor: '#F59E0B',
     border: '4px solid #FCD34D', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: '42px', marginBottom: '20px', boxShadow: '0 0 20px rgba(245, 158, 11, 0.3)',
+    fontSize: '36px', margin: '16px 0',
   },
-  buttonGroup: { display: 'flex', gap: '10px', width: '100%', marginTop: '8px', marginBottom: '20px' },
+  buttonGroup: { display: 'flex', gap: '10px', width: '100%', marginTop: '8px', marginBottom: '16px' },
   choiceBtn: {
-    flex: 1, padding: '12px', borderRadius: '12px', color: '#FFFFFF',
-    fontWeight: 'bold', border: '2px solid transparent', cursor: 'pointer', fontSize: '14px',
+    flex: 1, padding: '10px', borderRadius: '10px', color: '#FFFFFF',
+    fontWeight: 'bold', border: '2px solid transparent', cursor: 'pointer', fontSize: '13px',
   },
   input: {
     width: '100%', backgroundColor: '#0F172A', border: '1px solid #334155',
-    borderRadius: '12px', padding: '12px', color: '#FFFFFF', fontSize: '16px',
+    borderRadius: '10px', padding: '12px', color: '#FFFFFF', fontSize: '15px',
     fontWeight: 'bold', textAlign: 'center', boxSizing: 'border-box', outline: 'none',
   },
   actionBtn: {
     width: '100%', background: 'linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%)',
-    border: 'none', borderRadius: '12px', padding: '14px', color: '#FFFFFF',
-    fontSize: '16px', fontWeight: 'bold', cursor: 'pointer',
+    border: 'none', borderRadius: '10px', padding: '12px', color: '#FFFFFF',
+    fontSize: '15px', fontWeight: 'bold', cursor: 'pointer',
+  },
+  buyBtn: {
+    border: 'none', borderRadius: '8px', padding: '8px 14px', color: '#FFFFFF',
+    fontSize: '12px', fontWeight: 'bold',
   },
   logoutBtn: {
     backgroundColor: '#334155', border: 'none', color: '#CBD5E1', padding: '4px 10px',
     borderRadius: '6px', fontSize: '11px', cursor: 'pointer',
   },
   resultBox: {
-    width: '100%', padding: '12px', backgroundColor: '#0F172A', border: '1px solid',
-    borderRadius: '10px', textAlign: 'center', fontSize: '13px', fontWeight: 'bold',
-    marginBottom: '16px', boxSizing: 'border-box',
+    width: '100%', padding: '10px', backgroundColor: '#0F172A', border: '1px solid',
+    borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 'bold',
+    marginTop: '12px', boxSizing: 'border-box',
   },
-  ruleBox: {
-    width: '100%', backgroundColor: '#0F172A', borderRadius: '12px', padding: '14px',
-    border: '1px solid #334155', boxSizing: 'border-box',
+  itemCard: {
+    width: '100%', backgroundColor: '#0F172A', border: '1px solid #334155',
+    borderRadius: '10px', padding: '12px', display: 'flex', justifyContent: 'space-between',
+    alignItems: 'center', boxSizing: 'border-box',
   },
 };
