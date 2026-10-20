@@ -12,9 +12,19 @@ import {
   query, 
   where, 
   getDocs, 
-  runTransaction 
+  runTransaction,
+  serverTimestamp
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
+
+// 인벤토리: { 아이템이름: 개수 } (예전 배열 형식도 자동 변환)
+const toInv = (v) => Array.isArray(v)
+  ? v.reduce((a, n) => ({ ...a, [n]: (a[n] || 0) + 1 }), {})
+  : (v ?? {});
+const invText = (inv) => {
+  const list = Object.keys(inv).filter((k) => inv[k] > 0).map((k) => `${k} ×${inv[k]}`);
+  return list.length > 0 ? list.join(', ') : '없음';
+};
 
 // 하루에 주어지는 동전 던지기 횟수
 const DAILY_GAMES = 5;
@@ -57,7 +67,7 @@ export default function App() {
   // 유저 데이터
   const [gold, setGold] = useState(1000);
   const [remainingGames, setRemainingGames] = useState(5);
-  const [inventory, setInventory] = useState([]);
+  const [inventory, setInventory] = useState({});
   const [lastPlayDate, setLastPlayDate] = useState('');
 
   // 날짜가 바뀌었으면 자동으로 하루 횟수로 초기화된 값으로 계산
@@ -108,7 +118,7 @@ export default function App() {
           if (userDoc.exists()) {
             const data = userDoc.data();
             setGold(data.gold ?? 1000);
-            setInventory(data.inventory ?? []);
+            setInventory(toInv(data.inventory));
 
             if (data.lastPlayDate === today) {
               // 오늘 이미 접속한 기록이 있으면 저장된 횟수 사용
@@ -129,12 +139,12 @@ export default function App() {
               gold: 1000,
               remainingGames: DAILY_GAMES,
               lastPlayDate: today,
-              inventory: []
+              inventory: {}
             });
             setGold(1000);
             setRemainingGames(DAILY_GAMES);
             setLastPlayDate(today);
-            setInventory([]);
+            setInventory({});
           }
         } catch (error) {
           console.error("데이터 불러오기 에러:", error);
@@ -220,8 +230,7 @@ export default function App() {
           userId: displayId,
           gold: newGold,
           remainingGames: newRemainingGames,
-          lastPlayDate: today,
-          inventory: inventory
+          lastPlayDate: today
         }, { merge: true });
       }
     }, 800);
@@ -234,13 +243,9 @@ export default function App() {
       return;
     }
 
-    if (inventory.includes(item.name)) {
-      alert('이미 보유하고 있는 아이템입니다.');
-      return;
-    }
 
     const newGold = gold - item.price;
-    const newInventory = [...inventory, item.name];
+    const newInventory = { ...inventory, [item.name]: (inventory[item.name] || 0) + 1 };
 
     setGold(newGold);
     setInventory(newInventory);
@@ -306,6 +311,15 @@ export default function App() {
 
         transaction.update(myDocRef, { gold: newMyGold });
         transaction.update(targetDocRef, { gold: newTargetGold });
+        transaction.set(doc(collection(db, 'transfers')), {
+          type: 'gold',
+          fromUid: user.uid,
+          fromId: currentDisplayId,
+          toUid: targetDoc.id,
+          toId: cleanTargetId,
+          amount: transferAmount,
+          createdAt: serverTimestamp()
+        });
 
         setGold(newMyGold);
       });
@@ -357,22 +371,25 @@ export default function App() {
         if (!myDoc.exists()) throw new Error("내 계정 정보를 찾을 수 없습니다.");
 
         const myData = myDoc.data();
-        const myInv = myData.inventory ?? [];
-
-        if (!myInv.includes(selectedItemToTransfer)) {
+        const myInv = toInv(myData.inventory);
+        if ((myInv[selectedItemToTransfer] || 0) < 1) {
           throw new Error("보유하지 않은 아이템입니다.");
         }
-
-        const targetData = targetDoc.data();
-        const targetInv = targetData.inventory ?? [];
-
-        const newMyInv = myInv.filter(item => item !== selectedItemToTransfer);
-        const newTargetInv = targetInv.includes(selectedItemToTransfer) 
-          ? targetInv 
-          : [...targetInv, selectedItemToTransfer];
+        const targetInv = toInv(targetDoc.data().inventory);
+        const newMyInv = { ...myInv, [selectedItemToTransfer]: myInv[selectedItemToTransfer] - 1 };
+        const newTargetInv = { ...targetInv, [selectedItemToTransfer]: (targetInv[selectedItemToTransfer] || 0) + 1 };
 
         transaction.update(myDocRef, { inventory: newMyInv });
         transaction.update(targetDocRef, { inventory: newTargetInv });
+        transaction.set(doc(collection(db, 'transfers')), {
+          type: 'item',
+          fromUid: user.uid,
+          fromId: currentDisplayId,
+          toUid: targetDoc.id,
+          toId: cleanTargetId,
+          item: selectedItemToTransfer,
+          createdAt: serverTimestamp()
+        });
 
         setInventory(newMyInv);
       });
@@ -386,6 +403,33 @@ export default function App() {
     }
   };
 
+  // 양도 내역
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const loadHistory = async () => {
+    if (!user) return;
+    setHistoryLoading(true);
+    try {
+      const [sent, received] = await Promise.all([
+        getDocs(query(collection(db, 'transfers'), where('fromUid', '==', user.uid))),
+        getDocs(query(collection(db, 'transfers'), where('toUid', '==', user.uid))),
+      ]);
+      const list = [...sent.docs, ...received.docs].map((d) => ({ id: d.id, ...d.data() }));
+      list.sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+      setHistory(list.slice(0, 50));
+    } catch (error) {
+      console.error('양도 내역 불러오기 실패:', error);
+    }
+    setHistoryLoading(false);
+  };
+
+  useEffect(() => {
+    if (activeTab === 'transfer' && transferType === 'history') loadHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, transferType, user]);
+
+  const hasItems = Object.values(inventory).some((c) => c > 0);
   const displayUserId = user && user.email ? decodeURIComponent(user.email.split('@')[0]) : '플레이어';
 
   if (loading) {
@@ -451,7 +495,7 @@ export default function App() {
           보유 골드: <span style={{ color: '#FBBF24', fontSize: '34px', fontWeight: '800' }}>{gold.toLocaleString()} G</span>
         </div>
         <div style={{ fontSize: '12px', color: '#9A9AA3', marginTop: '6px' }}>
-          🎒 보유 아이템: {inventory.length > 0 ? inventory.join(', ') : '없음'}
+          🎒 보유 아이템: {invText(inventory)}
         </div>
       </div>
 
@@ -572,27 +616,28 @@ export default function App() {
 
           <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '12px' }}>
             {shopItems.map((item) => {
-              const isBought = inventory.includes(item.name);
+              const owned = inventory[item.name] || 0;
+              const cantBuy = gold < item.price;
               return (
                 <div key={item.id} style={styles.itemCard}>
                   <div>
                     <div style={{ fontWeight: 'bold', fontSize: '15px' }}>{item.name}</div>
                     <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{item.desc}</div>
                     <div style={{ fontSize: '13px', color: '#FBBF24', fontWeight: 'bold', marginTop: '4px' }}>
-                      {item.price.toLocaleString()} G
+                      {item.price.toLocaleString()} G<span style={{ color: '#8A8A93', fontWeight: 'normal', marginLeft: '6px' }}>· 보유 {owned}개</span>
                     </div>
                   </div>
                   <button
                     onClick={() => handleBuyItem(item)}
-                    disabled={isBought}
+                    disabled={cantBuy}
                     style={{
                       ...styles.buyBtn,
-                      backgroundColor: isBought ? '#2A2A30' : '#C6FF3D',
-                      color: isBought ? '#8A8A93' : '#0A0A0B',
-                      cursor: isBought ? 'not-allowed' : 'pointer',
+                      backgroundColor: cantBuy ? '#2A2A30' : '#C6FF3D',
+                      color: cantBuy ? '#8A8A93' : '#0A0A0B',
+                      cursor: cantBuy ? 'not-allowed' : 'pointer',
                     }}
                   >
-                    {isBought ? '구매완료' : '구매'}
+                    구매
                   </button>
                 </div>
               );
@@ -627,7 +672,46 @@ export default function App() {
             >
               🎒 아이템 양도
             </button>
+            <button
+              onClick={() => setTransferType('history')}
+              style={{
+                ...styles.subTabBtn,
+                backgroundColor: transferType === 'history' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
+                color: transferType === 'history' ? '#C6FF3D' : '#8A8A93',
+              }}
+            >
+              📜 내역
+            </button>
           </div>
+
+          {transferType === 'history' && (
+            <div style={{ width: '100%' }}>
+              {historyLoading ? (
+                <p style={{ ...styles.subText, textAlign: 'center' }}>불러오는 중...</p>
+              ) : history.length === 0 ? (
+                <p style={{ ...styles.subText, textAlign: 'center' }}>양도 내역이 없습니다.</p>
+              ) : (
+                history.map((h) => {
+                  const sent = h.fromUid === user.uid;
+                  const what = h.type === 'gold' ? `${(h.amount || 0).toLocaleString()} G` : `${h.item} ×1`;
+                  const when = h.createdAt?.toDate
+                    ? h.createdAt.toDate().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                    : '';
+                  return (
+                    <div key={h.id} style={styles.historyRow}>
+                      <div>
+                        <div style={{ fontWeight: '700', color: sent ? '#FF4D6D' : '#C6FF3D' }}>
+                          {sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`}
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#8A8A93', marginTop: '2px' }}>{when}</div>
+                      </div>
+                      <div style={{ fontWeight: '800' }}>{sent ? '-' : '+'}{what}</div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
 
           {transferType === 'gold' && (
             <form onSubmit={handleTransferGold} style={{ width: '100%' }}>
@@ -673,16 +757,16 @@ export default function App() {
 
               <div style={{ marginBottom: '20px', textAlign: 'left' }}>
                 <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>보낼 아이템 선택</label>
-                {inventory.length > 0 ? (
+                {hasItems ? (
                   <select
                     value={selectedItemToTransfer}
                     onChange={(e) => setSelectedItemToTransfer(e.target.value)}
                     style={styles.input}
                   >
                     <option value="">-- 아이템을 선택하세요 --</option>
-                    {inventory.map((itemName, index) => (
-                      <option key={index} value={itemName}>
-                        {itemName}
+                    {Object.keys(inventory).filter((k) => inventory[k] > 0).map((itemName) => (
+                      <option key={itemName} value={itemName}>
+                        {itemName} (×{inventory[itemName]})
                       </option>
                     ))}
                   </select>
@@ -695,11 +779,11 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={inventory.length === 0}
+                disabled={!hasItems}
                 style={{
                   ...styles.actionBtn,
-                  opacity: inventory.length === 0 ? 0.5 : 1,
-                  cursor: inventory.length === 0 ? 'not-allowed' : 'pointer',
+                  opacity: !hasItems ? 0.5 : 1,
+                  cursor: !hasItems ? 'not-allowed' : 'pointer',
                 }}
               >
                 아이템 전달하기
@@ -782,6 +866,11 @@ const styles = {
     width: '100%', padding: '13px', backgroundColor: '#0A0A0B', border: '1px solid',
     borderRadius: '12px', textAlign: 'center', fontSize: '13px', fontWeight: '700',
     marginTop: '14px', boxSizing: 'border-box', animation: 'fadeUp .3s ease both',
+  },
+  historyRow: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px',
+    padding: '12px', marginBottom: '8px', backgroundColor: '#1B1B1F',
+    border: '1px solid #26262B', borderRadius: '12px', fontSize: '13px',
   },
   itemCard: {
     width: '100%', backgroundColor: '#1B1B1F', border: '1px solid #26262B',
