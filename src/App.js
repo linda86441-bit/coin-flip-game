@@ -16,6 +16,42 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
+// 하루에 주어지는 동전 던지기 횟수
+const DAILY_GAMES = 5;
+
+// 오늘 날짜 문자열 (예: 2026-10-20) - 접속한 기기의 날짜 기준
+const getTodayString = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+// 전역 CSS (애니메이션, 호버 효과)
+const globalCss = `
+@keyframes coinSpin {
+  0%   { transform: perspective(600px) rotateY(0deg) translateY(0); }
+  50%  { transform: perspective(600px) rotateY(900deg) translateY(-44px); }
+  100% { transform: perspective(600px) rotateY(1800deg) translateY(0); }
+}
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 22px rgba(251,191,36,.35), inset 0 0 14px rgba(255,255,255,.35); }
+  50%      { box-shadow: 0 0 42px rgba(251,191,36,.75), inset 0 0 14px rgba(255,255,255,.35); }
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.coin { animation: glowPulse 2.5s ease-in-out infinite; }
+.coin-flip { animation: coinSpin 0.8s ease-in-out; }
+.fade-up { animation: fadeUp .35s ease both; }
+button { transition: transform .15s ease, filter .15s ease; }
+button:not(:disabled):hover { transform: translateY(-2px); filter: brightness(1.12); }
+button:not(:disabled):active { transform: translateY(0) scale(.98); }
+input:focus, select:focus { border-color: #FBBF24 !important; box-shadow: 0 0 0 3px rgba(251,191,36,.2); }
+`;
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -31,6 +67,10 @@ export default function App() {
   const [gold, setGold] = useState(1000);
   const [remainingGames, setRemainingGames] = useState(5);
   const [inventory, setInventory] = useState([]);
+  const [lastPlayDate, setLastPlayDate] = useState('');
+
+  // 날짜가 바뀌었으면 자동으로 하루 횟수로 초기화된 값으로 계산
+  const currentRemaining = lastPlayDate === getTodayString() ? remainingGames : DAILY_GAMES;
 
   // 동전 던지기 상태
   const [selectedChoice, setSelectedChoice] = useState('front');
@@ -72,21 +112,37 @@ export default function App() {
           
           const displayId = currentUser.email ? decodeURIComponent(currentUser.email.split('@')[0]) : '';
 
+          const today = getTodayString();
+
           if (userDoc.exists()) {
             const data = userDoc.data();
             setGold(data.gold ?? 1000);
-            setRemainingGames(data.remainingGames ?? 5);
             setInventory(data.inventory ?? []);
+
+            if (data.lastPlayDate === today) {
+              // 오늘 이미 접속한 기록이 있으면 저장된 횟수 사용
+              setRemainingGames(data.remainingGames ?? DAILY_GAMES);
+            } else {
+              // 날짜가 바뀌었으면 횟수 초기화
+              setRemainingGames(DAILY_GAMES);
+              await setDoc(userDocRef, {
+                remainingGames: DAILY_GAMES,
+                lastPlayDate: today
+              }, { merge: true });
+            }
+            setLastPlayDate(today);
           } else {
             // 문서가 없으면 기본값으로 자동 생성
             await setDoc(userDocRef, {
               userId: displayId,
               gold: 1000,
-              remainingGames: 5,
+              remainingGames: DAILY_GAMES,
+              lastPlayDate: today,
               inventory: []
             });
             setGold(1000);
-            setRemainingGames(5);
+            setRemainingGames(DAILY_GAMES);
+            setLastPlayDate(today);
             setInventory([]);
           }
         } catch (error) {
@@ -126,7 +182,7 @@ export default function App() {
 
   // 동전 던지기 게임 로직
   const handleFlipCoin = async () => {
-    if (remainingGames <= 0) {
+    if (currentRemaining <= 0) {
       alert('오늘 남은 게임 횟수가 없습니다!');
       return;
     }
@@ -158,10 +214,12 @@ export default function App() {
         setResultType('lose');
       }
 
-      const newRemainingGames = remainingGames - 1;
+      const today = getTodayString();
+      const newRemainingGames = currentRemaining - 1;
 
       setGold(newGold);
       setRemainingGames(newRemainingGames);
+      setLastPlayDate(today);
       setIsFlipping(false);
 
       if (user) {
@@ -171,6 +229,7 @@ export default function App() {
           userId: displayId,
           gold: newGold,
           remainingGames: newRemainingGames,
+          lastPlayDate: today,
           inventory: inventory
         }, { merge: true });
       }
@@ -346,6 +405,7 @@ export default function App() {
   if (!user) {
     return (
       <div style={styles.container}>
+      <style>{globalCss}</style>
         <div style={styles.gameCard}>
           <div style={{ fontSize: '32px', marginBottom: '8px' }}>🎲</div>
           <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '4px' }}>카지노 로그인</h1>
@@ -385,6 +445,7 @@ export default function App() {
   // 로그인 후 메인 화면
   return (
     <div style={styles.container}>
+      <style>{globalCss}</style>
       {/* 상단 프로필 영역 */}
       <div style={{ width: '100%', maxWidth: '380px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
         <span style={{ fontSize: '13px', color: '#94A3B8' }}>
@@ -409,8 +470,8 @@ export default function App() {
           onClick={() => setActiveTab('game')}
           style={{
             ...styles.tabBtn,
-            backgroundColor: activeTab === 'game' ? '#7C3AED' : '#1E293B',
-            color: activeTab === 'game' ? '#FFFFFF' : '#94A3B8',
+            backgroundColor: activeTab === 'game' ? 'rgba(251,191,36,0.18)' : 'rgba(15,23,42,0.6)',
+            color: activeTab === 'game' ? '#FBBF24' : '#94A3B8',
           }}
         >
           🎲 게임
@@ -419,8 +480,8 @@ export default function App() {
           onClick={() => setActiveTab('shop')}
           style={{
             ...styles.tabBtn,
-            backgroundColor: activeTab === 'shop' ? '#7C3AED' : '#1E293B',
-            color: activeTab === 'shop' ? '#FFFFFF' : '#94A3B8',
+            backgroundColor: activeTab === 'shop' ? 'rgba(251,191,36,0.18)' : 'rgba(15,23,42,0.6)',
+            color: activeTab === 'shop' ? '#FBBF24' : '#94A3B8',
           }}
         >
           🛒 상점
@@ -429,8 +490,8 @@ export default function App() {
           onClick={() => setActiveTab('transfer')}
           style={{
             ...styles.tabBtn,
-            backgroundColor: activeTab === 'transfer' ? '#7C3AED' : '#1E293B',
-            color: activeTab === 'transfer' ? '#FFFFFF' : '#94A3B8',
+            backgroundColor: activeTab === 'transfer' ? 'rgba(251,191,36,0.18)' : 'rgba(15,23,42,0.6)',
+            color: activeTab === 'transfer' ? '#FBBF24' : '#94A3B8',
           }}
         >
           💸 양도
@@ -443,10 +504,15 @@ export default function App() {
           <div style={styles.gameTitle}>[ 동전 던지기 ]</div>
 
           <div style={{
-            ...styles.coinCircle,
-            transform: isFlipping ? 'rotateY(720deg)' : 'none',
-            transition: 'transform 0.8s ease-in-out'
+            fontSize: '13px',
+            fontWeight: 'bold',
+            marginBottom: '4px',
+            color: currentRemaining > 0 ? '#A78BFA' : '#EF4444',
           }}>
+            🎟️ 오늘 남은 횟수: {currentRemaining}회
+          </div>
+
+          <div className={isFlipping ? 'coin coin-flip' : 'coin'} style={styles.coinCircle}>
             {currentCoinDisplay === 'FRONT' ? '☀️' : '🌙'}
           </div>
 
@@ -456,8 +522,8 @@ export default function App() {
               onClick={() => { setSelectedChoice('front'); setCurrentCoinDisplay('FRONT'); }}
               style={{
                 ...styles.choiceBtn,
-                backgroundColor: selectedChoice === 'front' ? '#7C3AED' : '#374151',
-                borderColor: selectedChoice === 'front' ? '#A78BFA' : 'transparent',
+                backgroundColor: selectedChoice === 'front' ? 'rgba(251,191,36,0.18)' : 'rgba(15,23,42,0.6)',
+                borderColor: selectedChoice === 'front' ? '#FBBF24' : 'transparent',
               }}
             >
               ☀️ 앞면 (해)
@@ -466,8 +532,8 @@ export default function App() {
               onClick={() => { setSelectedChoice('back'); setCurrentCoinDisplay('BACK'); }}
               style={{
                 ...styles.choiceBtn,
-                backgroundColor: selectedChoice === 'back' ? '#7C3AED' : '#374151',
-                borderColor: selectedChoice === 'back' ? '#A78BFA' : 'transparent',
+                backgroundColor: selectedChoice === 'back' ? 'rgba(251,191,36,0.18)' : 'rgba(15,23,42,0.6)',
+                borderColor: selectedChoice === 'back' ? '#FBBF24' : 'transparent',
               }}
             >
               🌙 뒷면 (달)
@@ -486,10 +552,10 @@ export default function App() {
 
           <button
             onClick={handleFlipCoin}
-            disabled={isFlipping || remainingGames <= 0}
+            disabled={isFlipping || currentRemaining <= 0}
             style={{
               ...styles.actionBtn,
-              opacity: (isFlipping || remainingGames <= 0) ? 0.5 : 1,
+              opacity: (isFlipping || currentRemaining <= 0) ? 0.5 : 1,
             }}
           >
             {isFlipping ? '동전 던지는 중...' : '동전 던지기!'}
@@ -553,8 +619,8 @@ export default function App() {
               onClick={() => setTransferType('gold')}
               style={{
                 ...styles.subTabBtn,
-                backgroundColor: transferType === 'gold' ? '#3B82F6' : '#0F172A',
-                color: transferType === 'gold' ? '#FFFFFF' : '#94A3B8',
+                backgroundColor: transferType === 'gold' ? 'rgba(251,191,36,0.18)' : '#0F172A',
+                color: transferType === 'gold' ? '#FBBF24' : '#94A3B8',
               }}
             >
               💰 골드 양도
@@ -563,8 +629,8 @@ export default function App() {
               onClick={() => setTransferType('item')}
               style={{
                 ...styles.subTabBtn,
-                backgroundColor: transferType === 'item' ? '#3B82F6' : '#0F172A',
-                color: transferType === 'item' ? '#FFFFFF' : '#94A3B8',
+                backgroundColor: transferType === 'item' ? 'rgba(251,191,36,0.18)' : '#0F172A',
+                color: transferType === 'item' ? '#FBBF24' : '#94A3B8',
               }}
             >
               🎒 아이템 양도
@@ -654,77 +720,92 @@ export default function App() {
   );
 }
 
+const card = {
+  backgroundColor: 'rgba(30,41,59,0.55)',
+  backdropFilter: 'blur(14px)',
+  WebkitBackdropFilter: 'blur(14px)',
+  border: '1px solid rgba(251,191,36,0.2)',
+  boxShadow: '0 10px 40px rgba(0,0,0,0.45)',
+};
+
 const styles = {
   container: {
     minHeight: '100vh',
-    backgroundColor: '#0F172A',
+    background:
+      'radial-gradient(circle at 15% 0%, rgba(124,58,237,0.35), transparent 45%), ' +
+      'radial-gradient(circle at 90% 100%, rgba(236,72,153,0.25), transparent 40%), #070B16',
     color: '#FFFFFF',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
     padding: '24px 16px',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif',
   },
   dashboardCard: {
-    width: '100%', maxWidth: '380px', backgroundColor: '#1E293B',
-    borderRadius: '16px', padding: '16px', marginBottom: '16px',
-    border: '1px solid #334155', textAlign: 'center', boxSizing: 'border-box',
+    ...card, width: '100%', maxWidth: '380px', borderRadius: '20px', padding: '18px',
+    marginBottom: '16px', textAlign: 'center', boxSizing: 'border-box',
+    border: '1px solid rgba(251,191,36,0.4)',
   },
-  goldText: { fontSize: '16px' },
-  tabGroup: {
-    display: 'flex', gap: '8px', width: '100%', maxWidth: '380px', marginBottom: '16px',
-  },
+  goldText: { fontSize: '15px', color: '#E2E8F0', letterSpacing: '0.5px' },
+  tabGroup: { display: 'flex', gap: '8px', width: '100%', maxWidth: '380px', marginBottom: '16px' },
   tabBtn: {
-    flex: 1, padding: '10px 0', borderRadius: '10px', border: '1px solid #334155',
+    flex: 1, padding: '11px 0', borderRadius: '12px', border: '1px solid rgba(251,191,36,0.2)',
     fontWeight: 'bold', fontSize: '13px', cursor: 'pointer',
   },
   subTabBtn: {
-    flex: 1, padding: '8px 0', borderRadius: '8px', border: '1px solid #334155',
+    flex: 1, padding: '9px 0', borderRadius: '10px', border: '1px solid rgba(251,191,36,0.2)',
     fontWeight: 'bold', fontSize: '12px', cursor: 'pointer',
   },
   gameCard: {
-    width: '100%', maxWidth: '380px', backgroundColor: '#1E293B',
-    borderRadius: '16px', padding: '24px', border: '1px solid #334155',
+    ...card, width: '100%', maxWidth: '380px', borderRadius: '20px', padding: '26px',
     display: 'flex', flexDirection: 'column', alignItems: 'center', boxSizing: 'border-box',
+    animation: 'fadeUp .35s ease both',
   },
-  gameTitle: { fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' },
+  gameTitle: {
+    fontSize: '20px', fontWeight: '800', marginBottom: '8px', letterSpacing: '2px',
+    background: 'linear-gradient(90deg, #FDE68A, #FBBF24, #F472B6)',
+    WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+  },
   subText: { fontSize: '12px', color: '#94A3B8' },
+  subtitle: { fontSize: '13px', color: '#94A3B8', marginBottom: '20px' },
   coinCircle: {
-    width: '80px', height: '80px', borderRadius: '50%', backgroundColor: '#F59E0B',
-    border: '4px solid #FCD34D', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: '36px', margin: '16px 0',
+    width: '96px', height: '96px', borderRadius: '50%',
+    background: 'radial-gradient(circle at 30% 30%, #FEF3C7, #FBBF24 55%, #B45309)',
+    border: '4px solid #FDE68A', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    fontSize: '42px', margin: '18px 0',
   },
   buttonGroup: { display: 'flex', gap: '10px', width: '100%', marginTop: '8px', marginBottom: '16px' },
   choiceBtn: {
-    flex: 1, padding: '10px', borderRadius: '10px', color: '#FFFFFF',
+    flex: 1, padding: '12px', borderRadius: '12px', color: '#FFFFFF',
     fontWeight: 'bold', border: '2px solid transparent', cursor: 'pointer', fontSize: '13px',
   },
   input: {
-    width: '100%', backgroundColor: '#0F172A', border: '1px solid #334155',
-    borderRadius: '10px', padding: '12px', color: '#FFFFFF', fontSize: '15px',
+    width: '100%', backgroundColor: 'rgba(7,11,22,0.7)', border: '1px solid rgba(148,163,184,0.3)',
+    borderRadius: '12px', padding: '13px', color: '#FFFFFF', fontSize: '15px',
     fontWeight: 'bold', textAlign: 'center', boxSizing: 'border-box', outline: 'none',
   },
   actionBtn: {
-    width: '100%', background: 'linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%)',
-    border: 'none', borderRadius: '10px', padding: '12px', color: '#FFFFFF',
-    fontSize: '15px', fontWeight: 'bold', cursor: 'pointer',
+    width: '100%', background: 'linear-gradient(135deg, #FDE68A 0%, #FBBF24 45%, #D97706 100%)',
+    border: 'none', borderRadius: '12px', padding: '14px', color: '#1F1300',
+    fontSize: '15px', fontWeight: '800', letterSpacing: '1px', cursor: 'pointer',
+    boxShadow: '0 6px 20px rgba(251,191,36,0.35)',
   },
   buyBtn: {
-    border: 'none', borderRadius: '8px', padding: '8px 14px', color: '#FFFFFF',
+    border: 'none', borderRadius: '10px', padding: '9px 16px', color: '#FFFFFF',
     fontSize: '12px', fontWeight: 'bold',
   },
   logoutBtn: {
-    backgroundColor: '#334155', border: 'none', color: '#CBD5E1', padding: '4px 10px',
-    borderRadius: '6px', fontSize: '11px', cursor: 'pointer',
+    backgroundColor: 'rgba(51,65,85,0.8)', border: '1px solid rgba(148,163,184,0.3)', color: '#CBD5E1',
+    padding: '5px 12px', borderRadius: '8px', fontSize: '11px', cursor: 'pointer',
   },
   resultBox: {
-    width: '100%', padding: '10px', backgroundColor: '#0F172A', border: '1px solid',
-    borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 'bold',
-    marginTop: '12px', boxSizing: 'border-box',
+    width: '100%', padding: '12px', backgroundColor: 'rgba(7,11,22,0.7)', border: '1px solid',
+    borderRadius: '12px', textAlign: 'center', fontSize: '13px', fontWeight: 'bold',
+    marginTop: '14px', boxSizing: 'border-box', animation: 'fadeUp .35s ease both',
   },
   itemCard: {
-    width: '100%', backgroundColor: '#0F172A', border: '1px solid #334155',
-    borderRadius: '10px', padding: '12px', display: 'flex', justifyContent: 'space-between',
+    width: '100%', backgroundColor: 'rgba(7,11,22,0.6)', border: '1px solid rgba(251,191,36,0.2)',
+    borderRadius: '14px', padding: '14px', display: 'flex', justifyContent: 'space-between',
     alignItems: 'center', boxSizing: 'border-box',
   },
 };
