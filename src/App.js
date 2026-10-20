@@ -8,16 +8,13 @@ import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
 export default function App() {
-  // 인증 및 유저 상태
   const [user, setUser] = useState(null);
   const [currentUserId, setCurrentUserId] = useState('');
   const [loading, setLoading] = useState(true);
 
-  // 로그인 입력 상태
   const [inputId, setInputId] = useState('');
   const [inputPw, setInputPw] = useState('');
 
-  // 게임 데이터 상태
   const [gold, setGold] = useState(1000);
   const [remainingGames, setRemainingGames] = useState(5);
   const maxGames = 5;
@@ -29,19 +26,31 @@ export default function App() {
   const [resultMessage, setResultMessage] = useState('');
   const [resultType, setResultType] = useState('');
 
-  // 로그인 상태 실시간 감지 및 Firestore에서 유저 데이터 불러오기
+  // 로그인 상태 감지 및 DB 데이터 불러오기
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         setUser(currentUser);
-        // DB에서 해당 유저의 골드와 남은 횟수 가져오기
-        const userDocRef = doc(db, 'users', currentUser.uid);
-        const userDoc = await getDoc(userDocRef);
-        if (userDoc.exists()) {
-          const data = userDoc.data();
-          setGold(data.gold ?? 1000);
-          setRemainingGames(data.remainingGames ?? 5);
-          setCurrentUserId(data.userId || inputId || '플레이어');
+        
+        // 1순위: 입력했던 아이디가 있으면 우선 사용
+        if (inputId) {
+          setCurrentUserId(inputId);
+        }
+
+        // 2순위: 데이터베이스(Firestore)에서 userId 가져오기
+        try {
+          const userDocRef = doc(db, 'users', currentUser.uid);
+          const userDoc = await getDoc(userDocRef);
+          if (userDoc.exists()) {
+            const data = userDoc.data();
+            setGold(data.gold ?? 1000);
+            setRemainingGames(data.remainingGames ?? 5);
+            if (data.userId) {
+              setCurrentUserId(data.userId);
+            }
+          }
+        } catch (error) {
+          console.error("데이터 불러오기 실패:", error);
         }
       } else {
         setUser(null);
@@ -52,10 +61,8 @@ export default function App() {
     return () => unsubscribe();
   }, [inputId]);
 
-  // 아이디를 가상 이메일로 변환하는 함수
   const getFakeEmail = (id) => `${id.trim()}@mygame.com`;
 
-  // 로그인 처리 (회원가입 기능 제거됨)
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
     if (!inputId || !inputPw) {
@@ -67,19 +74,19 @@ export default function App() {
 
     try {
       await signInWithEmailAndPassword(auth, fakeEmail, inputPw);
+      setCurrentUserId(inputId); // 로그인 직후 아이디 확실하게 고정
     } catch (error) {
       alert('로그인 실패: 등록되지 않은 아이디이거나 비밀번호가 틀렸습니다.');
     }
   };
 
-  // 로그아웃
   const handleLogout = async () => {
     await signOut(auth);
     setInputId('');
     setInputPw('');
+    setCurrentUserId('');
   };
 
-  // 동전 던지기 게임 로직 및 Firestore에 골드 실시간 동기화
   const handleFlipCoin = async () => {
     if (remainingGames <= 0) {
       alert('오늘 남은 게임 횟수가 없습니다!');
@@ -105,22 +112,20 @@ export default function App() {
       if (isWin) {
         const winGold = betAmount;
         newGold += winGold * 2;
-        setResultMessage(`🎉 축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`);
+        setResultMessage(`축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`);
         setResultType('win');
       } else {
         newGold -= betAmount;
-        setResultMessage(`💀 아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`);
+        setResultMessage(`아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`);
         setResultType('lose');
       }
 
       const newRemainingGames = remainingGames - 1;
 
-      // 상태 업데이트
       setGold(newGold);
       setRemainingGames(newRemainingGames);
       setIsFlipping(false);
 
-      // Firebase 데이터베이스에 변경된 골드와 남은 횟수 저장
       if (user) {
         const userDocRef = doc(db, 'users', user.uid);
         await updateDoc(userDocRef, {
@@ -135,7 +140,7 @@ export default function App() {
     return <div style={{ color: '#fff', textAlign: 'center', marginTop: '50px' }}>로딩 중...</div>;
   }
 
-  // 1. 로그아웃 상태일 때: 지정된 계정 전용 로그인 화면
+  // 로그인 화면
   if (!user) {
     return (
       <div style={styles.container}>
@@ -170,20 +175,18 @@ export default function App() {
               로그인하기
             </button>
           </form>
-
-          <p style={{ color: '#64748B', fontSize: '11px', marginTop: '16px' }}>
-            * 계정 생성이 필요한 경우 관리자에게 문의하세요.
-          </p>
         </div>
       </div>
     );
   }
 
-  // 2. 로그인 성공 시: 동전 던지기 게임 화면
+  // 게임 화면
   return (
     <div style={styles.container}>
       <div style={{ width: '100%', maxWidth: '380px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-        <span style={{ fontSize: '13px', color: '#94A3B8' }}>접속 계정: <strong style={{ color: '#FBBF24' }}>{currentUserId}</strong></span>
+        <span style={{ fontSize: '13px', color: '#94A3B8' }}>
+          접속 계정: <strong style={{ color: '#FBBF24' }}>{currentUserId || user.email.split('@')[0]}</strong>
+        </span>
         <button onClick={handleLogout} style={styles.logoutBtn}>로그아웃</button>
       </div>
 
@@ -293,7 +296,6 @@ export default function App() {
   );
 }
 
-// 스타일 모음
 const styles = {
   container: {
     minHeight: '100vh',
