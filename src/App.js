@@ -53,9 +53,9 @@ export default function App() {
 
   // 상점 아이템 목록
   const shopItems = [
-    { id: 'item_01', name: '철릭', price: 500, desc: '전통 무관의 멋진 의복입니다.' },
-    { id: 'item_02', name: '쌍륙 판', price: 1200, desc: '전통 보드게임용 판입니다.' },
-    { id: 'item_03', name: '손전등', price: 300, desc: '어두운 곳을 밝히는 도구입니다.' },
+    { id: 'item_01', name: '테스트템1', price: 500, desc: '템 설명 적는 곳.' },
+    { id: 'item_02', name: '테스트템2', price: 1200, desc: '템 설명 적는 곳.' },
+    { id: 'item_03', name: '테스트템3', price: 300, desc: '템 설명 적는 곳.' },
   ];
 
   // 한글 아이디를 이메일 형식으로 변환
