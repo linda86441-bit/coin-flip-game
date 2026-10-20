@@ -7,6 +7,7 @@ import {
 import { 
   doc, 
   getDoc, 
+  setDoc, 
   updateDoc, 
   collection, 
   query, 
@@ -53,15 +54,15 @@ export default function App() {
 
   // 상점 아이템 목록
   const shopItems = [
-    { id: 'item_01', name: '테스트템1', price: 500, desc: '템 설명 적는 곳.' },
-    { id: 'item_02', name: '테스트템2', price: 1200, desc: '템 설명 적는 곳.' },
-    { id: 'item_03', name: '테스트템3', price: 300, desc: '템 설명 적는 곳.' },
+    { id: 'item_01', name: '철릭', price: 500, desc: '전통 무관의 멋진 의복입니다.' },
+    { id: 'item_02', name: '쌍륙 판', price: 1200, desc: '전통 보드게임용 판입니다.' },
+    { id: 'item_03', name: '손전등', price: 300, desc: '어두운 곳을 밝히는 도구입니다.' },
   ];
 
   // 한글 아이디를 이메일 형식으로 변환
   const getFakeEmail = (id) => `${encodeURIComponent(id.trim())}@mygame.com`;
 
-  // 로그인 상태 감지 및 DB 조회
+  // 로그인 상태 감지 및 DB 조회 (없으면 자동 생성)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
@@ -69,11 +70,25 @@ export default function App() {
         try {
           const userDocRef = doc(db, 'users', currentUser.uid);
           const userDoc = await getDoc(userDocRef);
+          
+          const displayId = currentUser.email ? decodeURIComponent(currentUser.email.split('@')[0]) : '';
+
           if (userDoc.exists()) {
             const data = userDoc.data();
             setGold(data.gold ?? 1000);
             setRemainingGames(data.remainingGames ?? 5);
             setInventory(data.inventory ?? []);
+          } else {
+            // 문서가 없으면 기본값으로 자동 생성
+            await setDoc(userDocRef, {
+              userId: displayId,
+              gold: 1000,
+              remainingGames: 5,
+              inventory: []
+            });
+            setGold(1000);
+            setRemainingGames(5);
+            setInventory([]);
           }
         } catch (error) {
           console.error("데이터 불러오기 에러:", error);
@@ -152,10 +167,13 @@ export default function App() {
 
       if (user) {
         const userDocRef = doc(db, 'users', user.uid);
-        await updateDoc(userDocRef, {
+        const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+        await setDoc(userDocRef, {
+          userId: displayId,
           gold: newGold,
           remainingGames: newRemainingGames,
-        });
+          inventory: inventory
+        }, { merge: true });
       }
     }, 800);
   };
@@ -180,10 +198,12 @@ export default function App() {
 
     if (user) {
       const userDocRef = doc(db, 'users', user.uid);
-      await updateDoc(userDocRef, {
+      const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+      await setDoc(userDocRef, {
+        userId: displayId,
         gold: newGold,
-        inventory: newInventory,
-      });
+        inventory: newInventory
+      }, { merge: true });
       alert(`[${item.name}]을(를) 성공적으로 구매하셨습니다!`);
     }
   };
@@ -297,9 +317,7 @@ export default function App() {
         const targetData = targetDoc.data();
         const targetInv = targetData.inventory ?? [];
 
-        // 내 인벤토리에서 제거
         const newMyInv = myInv.filter(item => item !== selectedItemToTransfer);
-        // 상대방 인벤토리에 추가 (중복 방지)
         const newTargetInv = targetInv.includes(selectedItemToTransfer) 
           ? targetInv 
           : [...targetInv, selectedItemToTransfer];
@@ -526,12 +544,11 @@ export default function App() {
         </div>
       )}
 
-      {/* TAB 3: 양도 (골드 & 아이템 양도 서브탭 포함) */}
+      {/* TAB 3: 양도 센터 */}
       {activeTab === 'transfer' && (
         <div style={styles.gameCard}>
           <div style={styles.gameTitle}>[ 양도 센터 ]</div>
 
-          {/* 양도종류 선택 서브탭 */}
           <div style={{ display: 'flex', gap: '6px', width: '100%', marginBottom: '16px' }}>
             <button
               onClick={() => setTransferType('gold')}
@@ -555,7 +572,6 @@ export default function App() {
             </button>
           </div>
 
-          {/* 골드 양도 폼 */}
           {transferType === 'gold' && (
             <form onSubmit={handleTransferGold} style={{ width: '100%' }}>
               <div style={{ marginBottom: '14px', textAlign: 'left' }}>
@@ -585,7 +601,6 @@ export default function App() {
             </form>
           )}
 
-          {/* 아이템 양도 폼 */}
           {transferType === 'item' && (
             <form onSubmit={handleTransferItem} style={{ width: '100%' }}>
               <div style={{ marginBottom: '14px', textAlign: 'left' }}>
@@ -605,10 +620,7 @@ export default function App() {
                   <select
                     value={selectedItemToTransfer}
                     onChange={(e) => setSelectedItemToTransfer(e.target.value)}
-                    style={{
-                      ...styles.input,
-                      cursor: 'pointer',
-                    }}
+                    style={styles.input}
                   >
                     <option value="">-- 아이템을 선택하세요 --</option>
                     {inventory.map((itemName, index) => (
