@@ -13,13 +13,13 @@ import {
   where, 
   getDocs, 
   runTransaction,
-  writeBatch,
   orderBy,
   limit,
   startAfter,
   serverTimestamp
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
+import { SHOP_ITEMS, itemLabel } from './shopItems';
 
 // 인벤토리: { 아이템이름: 개수 } (예전 배열 형식도 자동 변환)
 const toInv = (v) => Array.isArray(v)
@@ -27,10 +27,13 @@ const toInv = (v) => Array.isArray(v)
   : (v ?? {});
 
 // 오류 안내 문구 (Firebase 사용량 초과 등)
-const errMsg = (e) =>
-  e && e.code === 'resource-exhausted'
-    ? '접속자가 많아 지금은 처리할 수 없어요. 잠시 후 다시 시도해 주세요.'
-    : (e && e.message) || '알 수 없는 오류가 발생했어요.';
+const errMsg = (e) => {
+  const code = e && e.code;
+  if (code === 'resource-exhausted') return '접속자가 많아 지금은 처리할 수 없어요. 잠시 후 다시 시도해 주세요.';
+  if (code === 'permission-denied') return '권한 오류가 발생했어요. 새 버전이 배포된 직후라면 Ctrl+Shift+R(모바일은 페이지 새로고침) 후 다시 시도해 주세요.';
+  if (code === 'unavailable') return '네트워크 연결이 불안정해요. 잠시 후 다시 시도해 주세요.';
+  return (e && e.message) || '알 수 없는 오류가 발생했어요.';
+};
 
 // 내역 한 줄에 보여줄 문구/값/색상
 const historyView = (h, myUid) => {
@@ -39,7 +42,7 @@ const historyView = (h, myUid) => {
   const gold = `${(h.amount || 0).toLocaleString()} G`;
   switch (h.type) {
     case 'buy':
-      return { label: `🛒 ${h.item} ×${qty} 구매`, value: h.amount > 0 ? `-${gold}` : '무료', color: '#CFE0FF' };
+      return { label: `🛒 ${itemLabel(h.item)} ×${qty} 구매`, value: h.amount > 0 ? `-${gold}` : '무료', color: '#CFE0FF' };
     case 'flip':
       return {
         label: h.amount > 0 ? '🎲 동전 던지기 · 승리' : '🎲 동전 던지기 · 패배',
@@ -47,13 +50,13 @@ const historyView = (h, myUid) => {
         color: h.amount > 0 ? '#FBBF24' : '#FF4D6D',
       };
     case 'use':
-      return { label: `✓ ${h.item} 사용`, value: `-${h.item} ×${qty}`, color: '#9DB0D6' };
+      return { label: `✓ ${itemLabel(h.item)} 사용`, value: `-${itemLabel(h.item)} ×${qty}`, color: '#9DB0D6' };
     case 'grant':
       return { label: sent ? `🎁 ${h.toId}에게 포인트 지급` : '🎁 포인트 지급', value: `+${gold}`, color: '#FBBF24' };
     case 'item':
       return {
         label: sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`,
-        value: `${sent ? '-' : '+'}${h.item} ×${qty}`,
+        value: `${sent ? '-' : '+'}${itemLabel(h.item)} ×${qty}`,
         color: sent ? '#FF4D6D' : '#CFE0FF',
       };
     default: // 'gold'
@@ -140,13 +143,8 @@ export default function App() {
   const [selectedItemToTransfer, setSelectedItemToTransfer] = useState('');
   const [transferItemQty, setTransferItemQty] = useState(1);
 
-  // 상점 아이템 목록 (이름/설명 수정됨)
-  const shopItems = [
-    // img: public/images 폴더에 넣은 파일 이름 (파일이 없으면 icon 이모지가 대신 보입니다)
-    { id: 'item_01', name: '테스트템1', price: 500, desc: '아이템 설명 적는 곳.', img: 'item1.png', icon: '🎁' },
-    { id: 'item_02', name: '테스트템2', price: 1200, desc: '아이템 설명 적는 곳.', img: 'item2.png', icon: '🎁' },
-    { id: 'item_03', name: '테스트템3', price: 300, desc: '아이템 설명 적는 곳.', img: 'item3.png', icon: '🎁' },
-  ];
+  // 상점 아이템 목록은 shopItems.js 에서 고칩니다
+  const shopItems = SHOP_ITEMS;
 
   // 한글 아이디를 이메일 형식으로 변환
   const getFakeEmail = (id) => `${encodeURIComponent(id.trim())}@mygame.com`;
@@ -171,17 +169,8 @@ export default function App() {
             setInventory(toInv(data.inventory));
             setIsAdmin(data.isAdmin === true);
 
-            if (data.lastPlayDate === today) {
-              // 오늘 이미 접속한 기록이 있으면 저장된 횟수 사용
-              setRemainingGames(data.remainingGames ?? DAILY_GAMES);
-            } else {
-              // 날짜가 바뀌었으면 횟수 초기화
-              setRemainingGames(DAILY_GAMES);
-              await setDoc(userDocRef, {
-                remainingGames: DAILY_GAMES,
-                lastPlayDate: today
-              }, { merge: true });
-            }
+            // 오늘 던진 기록이 있으면 저장된 횟수, 날짜가 바뀌었으면 5회 (초기화는 서버가 던질 때 처리)
+            setRemainingGames(data.lastPlayDate === today ? (data.remainingGames ?? DAILY_GAMES) : DAILY_GAMES);
             setLastPlayDate(today);
           } else {
             // 문서가 없으면 기본값으로 자동 생성
@@ -233,13 +222,15 @@ export default function App() {
     setInputPw('');
   };
 
-  // 동전 던지기 게임 로직
+  // 동전 던지기: 결과는 서버(/api/flip)가 정합니다 (브라우저에서 조작 불가)
   const handleFlipCoin = async () => {
+    if (isFlipping) return;
     if (currentRemaining <= 0) {
       alert('오늘 남은 게임 횟수가 없습니다!');
       return;
     }
-    if (betAmount <= 0 || (!isAdmin && betAmount > gold)) {
+    const bet = Math.floor(Number(betAmount));
+    if (!bet || bet <= 0 || (!isAdmin && bet > gold)) {
       alert('베팅 금액을 다시 확인해 주세요.');
       return;
     }
@@ -248,72 +239,40 @@ export default function App() {
     setResultMessage('');
     setResultType('');
 
-    setTimeout(async () => {
-      const coinResult = Math.random() < 0.5 ? 'front' : 'back';
-      const isWin = selectedChoice === coinResult;
-      const sideName = coinResult === 'front' ? '앞면(해)' : '뒷면(달)';
+    try {
+      const idToken = await user.getIdToken();
+      const request = fetch('/api/flip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ bet, choice: selectedChoice })
+      }).then(async (resp) => {
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(body.error || '서버와 연결하지 못했어요. 잠시 후 다시 시도해 주세요.');
+        return body;
+      });
+      // 동전 도는 연출(0.8초)과 서버 응답을 함께 기다림
+      const [data] = await Promise.all([request, new Promise((r) => setTimeout(r, 800))]);
 
-      let newGold = gold;
-      let message;
-      let type;
-      if (isWin) {
-        const winGold = betAmount;
-        newGold += winGold * 2;
-        message = `🎉 축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`;
-        type = 'win';
+      const sideName = data.result === 'front' ? '앞면(해)' : '뒷면(달)';
+      setCurrentCoinDisplay(data.result === 'front' ? 'FRONT' : 'BACK');
+      if (data.win) {
+        setResultMessage(`🎉 축하합니다! 동전은 [${sideName}]이었습니다.${isAdmin ? '' : ` +${data.delta} 골드 획득!`}`);
+        setResultType('win');
       } else {
-        newGold -= betAmount;
-        message = `💀 아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`;
-        type = 'lose';
+        setResultMessage(`💀 아쉽네요! 동전은 [${sideName}]이었습니다.${isAdmin ? '' : ` -${Math.abs(data.delta)} 골드`}`);
+        setResultType('lose');
       }
-
-      const today = getTodayString();
-      if (isAdmin) newGold = gold; // 관리자는 골드 변화 없음
-      const newRemainingGames = currentRemaining - 1;
-
-      // 저장에 성공한 뒤에만 화면에 반영 (실패하면 아무것도 바뀌지 않음)
-      if (user) {
-        try {
-          const userDocRef = doc(db, 'users', user.uid);
-          const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
-          // 게임 결과와 내역을 한 번에 저장 (관리자는 골드 변화가 없어서 내역을 남기지 않음)
-          const batch = writeBatch(db);
-          batch.set(userDocRef, {
-            userId: displayId,
-            gold: newGold,
-            remainingGames: newRemainingGames,
-            lastPlayDate: today
-          }, { merge: true });
-          if (!isAdmin) {
-            batch.set(doc(collection(db, 'transfers')), {
-              type: 'flip',
-              uids: [user.uid],
-              fromUid: user.uid,
-              fromId: displayId,
-              amount: newGold - gold, // 이기면 +, 지면 -
-              createdAt: serverTimestamp()
-            });
-          }
-          await batch.commit();
-        } catch (error) {
-          console.error('동전 던지기 저장 실패:', error);
-          alert(`저장에 실패해서 이번 게임은 기록되지 않았어요.\n${errMsg(error)}`);
-          setIsFlipping(false);
-          return;
-        }
-      }
-
-      setCurrentCoinDisplay(coinResult === 'front' ? 'FRONT' : 'BACK');
-      setResultMessage(message);
-      setResultType(type);
-      setGold(newGold);
-      setRemainingGames(newRemainingGames);
-      setLastPlayDate(today);
-      setIsFlipping(false);
-    }, 800);
+      setGold(data.gold);
+      setRemainingGames(data.remainingGames);
+      setLastPlayDate(getTodayString());
+    } catch (error) {
+      console.error('동전 던지기 실패:', error);
+      alert(`게임을 진행하지 못했어요. 골드와 횟수는 그대로예요.\n${errMsg(error)}`);
+    }
+    setIsFlipping(false);
   };
 
-  // 아이템 구매 로직
+  // 아이템 구매 로직 (저장된 최신 골드/아이템을 읽어서 계산 → 다른 사람에게 받은 골드가 덮어써지지 않음)
   const handleBuyItem = async (item, qty = 1) => {
     const totalPrice = item.price * qty;
     if (!isAdmin && gold < totalPrice) {
@@ -321,42 +280,41 @@ export default function App() {
       return;
     }
 
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+      let result = null;
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(userDocRef);
+        if (!snap.exists()) throw new Error('내 계정 정보를 찾을 수 없습니다.');
+        const data = snap.data();
+        const nowGold = data.gold ?? 0;
+        if (!isAdmin && nowGold < totalPrice) throw new Error('골드가 부족합니다!');
+        const inv = toInv(data.inventory);
+        const newGold = isAdmin ? nowGold : nowGold - totalPrice;
+        const newInventory = { ...inv, [item.id]: (inv[item.id] || 0) + qty };
 
-    const newGold = isAdmin ? gold : gold - totalPrice;
-    const newInventory = { ...inventory, [item.name]: (inventory[item.name] || 0) + qty };
-
-    if (user) {
-      try {
-        const userDocRef = doc(db, 'users', user.uid);
-        const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
-        // 골드/아이템 변경과 구매 내역을 한 번에 저장 (둘 다 성공하거나 둘 다 실패)
-        const batch = writeBatch(db);
-        batch.set(userDocRef, {
-          userId: displayId,
-          gold: newGold,
-          inventory: newInventory
-        }, { merge: true });
-        batch.set(doc(collection(db, 'transfers')), {
+        const logRef = doc(collection(db, 'transfers'));
+        transaction.update(userDocRef, { gold: newGold, inventory: newInventory, lastLogId: logRef.id });
+        transaction.set(logRef, {
           type: 'buy',
           uids: [user.uid],
           fromUid: user.uid,
           fromId: displayId,
-          item: item.name,
+          item: item.id,
           qty,
           amount: isAdmin ? 0 : totalPrice,
           createdAt: serverTimestamp()
         });
-        await batch.commit();
-      } catch (error) {
-        console.error('구매 저장 실패:', error);
-        alert(`구매에 실패했어요. 골드는 차감되지 않았어요.\n${errMsg(error)}`);
-        return;
-      }
+        result = { newGold, newInventory };
+      });
+      setGold(result.newGold);
+      setInventory(result.newInventory);
+      alert(`[${item.name}] ${qty}개를 성공적으로 구매하셨습니다!`);
+    } catch (error) {
+      console.error('구매 저장 실패:', error);
+      alert(`구매에 실패했어요. 골드는 차감되지 않았어요.\n${errMsg(error)}`);
     }
-
-    setGold(newGold);
-    setInventory(newInventory);
-    alert(`[${item.name}] ${qty}개를 성공적으로 구매하셨습니다!`);
   };
 
   // 골드 양도(송금) 로직
@@ -407,9 +365,10 @@ export default function App() {
         const newMyGold = isAdmin ? (myData.gold ?? 0) : (myData.gold ?? 0) - transferAmount;
         const newTargetGold = (targetData.gold ?? 0) + transferAmount;
 
-        if (!isAdmin) transaction.update(myDocRef, { gold: newMyGold });
+        const logRef = doc(collection(db, 'transfers'));
+        if (!isAdmin) transaction.update(myDocRef, { gold: newMyGold, lastLogId: logRef.id });
         transaction.update(targetDocRef, { gold: newTargetGold });
-        transaction.set(doc(collection(db, 'transfers')), {
+        transaction.set(logRef, {
           type: isAdmin ? 'grant' : 'gold',
           uids: [user.uid, targetDoc.id],
           fromUid: user.uid,
@@ -509,7 +468,7 @@ export default function App() {
       });
       if (invAfter !== null) setInventory(invAfter);
 
-      alert(`[${cleanTargetId}] 님에게 [${selectedItemToTransfer}] ${qty}개를 전달했습니다!`);
+      alert(`[${cleanTargetId}] 님에게 [${itemLabel(selectedItemToTransfer)}] ${qty}개를 전달했습니다!`);
       setTargetItemUserId('');
       setSelectedItemToTransfer('');
       setTransferItemQty(1);
@@ -522,7 +481,7 @@ export default function App() {
   // 아이템 사용: 개수 1 차감 + 사용 기록 저장 (되돌릴 수 없음)
   const handleUseItem = async (itemName) => {
     if ((inventory[itemName] || 0) < 1) return;
-    if (!window.confirm(`[${itemName}] 1개를 사용할까요?\n사용하면 되돌릴 수 없어요.`)) return;
+    if (!window.confirm(`[${itemLabel(itemName)}] 1개를 사용할까요?\n사용하면 되돌릴 수 없어요.`)) return;
 
     try {
       const myDocRef = doc(db, 'users', user.uid);
@@ -549,7 +508,7 @@ export default function App() {
         invAfter = newInv;
       });
       if (invAfter !== null) setInventory(invAfter);
-      alert(`[${itemName}]을(를) 사용했어요.`);
+      alert(`[${itemLabel(itemName)}]을(를) 사용했어요.`);
     } catch (error) {
       console.error('아이템 사용 실패:', error);
       alert(`아이템 사용 실패: ${errMsg(error)}`);
@@ -734,7 +693,7 @@ export default function App() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
                   {Object.keys(inventory).filter((k) => inventory[k] > 0).map((name) => (
                     <div key={name} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <b style={{ color: '#FFFFFF' }}>{name} ×{inventory[name]}</b>
+                      <b style={{ color: '#FFFFFF' }}>{itemLabel(name)} ×{inventory[name]}</b>
                       <button onClick={() => handleUseItem(name)} style={styles.useBtn}>사용</button>
                     </div>
                   ))}
@@ -934,7 +893,7 @@ export default function App() {
 
           <div style={styles.shopGrid}>
             {shopItems.map((item) => {
-              const owned = inventory[item.name] || 0;
+              const owned = inventory[item.id] || 0;
               const qty = buyQty[item.id] || 1;
               const total = item.price * qty;
               const cantBuy = !isAdmin && gold < total;
@@ -1064,7 +1023,7 @@ export default function App() {
                     <option value="">-- 아이템을 선택하세요 --</option>
                     {Object.keys(inventory).filter((k) => inventory[k] > 0).map((itemName) => (
                       <option key={itemName} value={itemName}>
-                        {itemName} (×{inventory[itemName]})
+                        {itemLabel(itemName)} (×{inventory[itemName]})
                       </option>
                     ))}
                   </select>
