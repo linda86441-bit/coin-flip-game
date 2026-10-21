@@ -559,21 +559,25 @@ export default function App() {
   const setQty = (id, v) =>
     setBuyQty((prev) => ({ ...prev, [id]: Math.min(99, Math.max(1, Math.floor(v) || 1)) }));
 
-  // 내역 (최근 20건씩 불러오고, 더보기로 이어서 불러옴)
-  const HISTORY_PAGE = 20;
+  // 내역 (최근 40건씩 읽어 4건씩 페이지로 보여주고, 끝에서 다음을 누르면 이어서 불러옴)
+  const HISTORY_VIEW = 4; // 화면에 한 페이지로 보여주는 개수
+  const PAGER_GROUP = 10; // 페이지 번호를 한 묶음에 보여주는 개수
+  const HISTORY_PAGE = HISTORY_VIEW * PAGER_GROUP; // 서버에서 한 번에 읽어오는 개수 (번호 한 묶음 분량)
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyMoreLoading, setHistoryMoreLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const [historyCursor, setHistoryCursor] = useState(null);
   const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1);
   const [sidePanel, setSidePanel] = useState('info'); // 'info' | 'history'
 
   const loadHistory = async (more = false) => {
-    if (!user) return;
+    if (!user) return 0;
     if (more) setHistoryMoreLoading(true);
-    else setHistoryLoading(true);
+    else { setHistoryLoading(true); setHistoryPage(1); }
     setHistoryError('');
+    let fetched = 0;
     try {
       const constraints = [
         where('uids', 'array-contains', user.uid),
@@ -584,6 +588,7 @@ export default function App() {
 
       const snap = await getDocs(query(collection(db, 'transfers'), ...constraints));
       const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      fetched = rows.length;
       setHistory((prev) => (more ? [...prev, ...rows] : rows));
       setHistoryCursor(snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : historyCursor);
       setHistoryHasMore(snap.docs.length === HISTORY_PAGE);
@@ -593,6 +598,24 @@ export default function App() {
     }
     setHistoryLoading(false);
     setHistoryMoreLoading(false);
+    return fetched;
+  };
+
+  // 페이지 계산 (한 묶음에 번호 4개씩 보여줌)
+  const historyTotalPages = Math.max(1, Math.ceil(history.length / HISTORY_VIEW));
+  const pagerStart = Math.floor((historyPage - 1) / PAGER_GROUP) * PAGER_GROUP + 1;
+  const pagerNumbers = Array.from({ length: PAGER_GROUP }, (_, i) => pagerStart + i).filter((n) => n <= historyTotalPages);
+  const historyCanNext = historyPage < historyTotalPages || historyHasMore;
+
+  const goPrevPage = () => setHistoryPage((p) => Math.max(1, p - 1));
+  const goNextPage = async () => {
+    if (historyPage < historyTotalPages) {
+      setHistoryPage((p) => p + 1);
+    } else if (historyHasMore) {
+      // 읽어둔 내역을 다 봤으면 다음 내역을 이어서 불러온 뒤 넘어감
+      const added = await loadHistory(true);
+      if (added > 0) setHistoryPage((p) => p + 1);
+    }
   };
 
   useEffect(() => {
@@ -724,7 +747,7 @@ export default function App() {
         )}
 
         {sidePanel === 'history' && (
-          <div style={{ maxHeight: '260px', overflowY: 'auto' }}>
+          <div>
             {historyLoading ? (
               <p style={{ ...styles.subText, textAlign: 'center' }}>불러오는 중...</p>
             ) : historyError ? (
@@ -736,7 +759,7 @@ export default function App() {
             ) : history.length === 0 ? (
               <p style={{ ...styles.subText, textAlign: 'center' }}>내역이 없습니다.</p>
             ) : (
-              history.map((h) => {
+              history.slice((historyPage - 1) * HISTORY_VIEW, historyPage * HISTORY_VIEW).map((h) => {
                 const view = historyView(h, user.uid);
                 const when = h.createdAt?.toDate
                   ? h.createdAt.toDate().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -752,14 +775,36 @@ export default function App() {
                 );
               })
             )}
-            {!historyLoading && !historyError && historyHasMore && (
-              <button
-                onClick={() => loadHistory(true)}
-                disabled={historyMoreLoading}
-                style={{ ...styles.subTabBtn, width: '100%', flex: 'none', marginTop: '4px', opacity: historyMoreLoading ? 0.6 : 1 }}
-              >
-                {historyMoreLoading ? '불러오는 중...' : '더보기'}
-              </button>
+            {!historyLoading && !historyError && history.length > 0 && (historyTotalPages > 1 || historyHasMore) && (
+              <div style={styles.pager}>
+                <button
+                  onClick={goPrevPage}
+                  disabled={historyPage <= 1 || historyMoreLoading}
+                  aria-label="이전 페이지"
+                  style={{ ...styles.pagerArrow, opacity: historyPage <= 1 ? 0.3 : 1 }}
+                >
+                  ‹
+                </button>
+                <div style={styles.pagerNums}>
+                  {pagerNumbers.map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setHistoryPage(n)}
+                      style={{ ...styles.pagerNum, ...(n === historyPage ? styles.pagerNumOn : null) }}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={goNextPage}
+                  disabled={!historyCanNext || historyMoreLoading}
+                  aria-label="다음 페이지"
+                  style={{ ...styles.pagerArrow, opacity: !historyCanNext || historyMoreLoading ? 0.3 : 1 }}
+                >
+                  ›
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -1187,6 +1232,20 @@ const styles = {
     width: '100%', border: 'none', borderRadius: '4px', padding: '10px 6px', color: '#0B1430',
     fontSize: '12px', fontWeight: '800', background: 'linear-gradient(180deg, #E4EEFF, #A9C4FF)',
   },
+  pager: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px', marginTop: '10px' },
+  pagerArrow: {
+    width: '32px', height: '32px', fontSize: '22px', lineHeight: 1, cursor: 'pointer',
+    color: '#CFE0FF', backgroundColor: 'transparent', border: 'none',
+  },
+  pagerNums: {
+    display: 'flex', border: '1px solid rgba(160,190,255,0.3)', borderRadius: '4px', overflow: 'hidden',
+  },
+  pagerNum: {
+    minWidth: '26px', height: '32px', padding: '0 4px', fontSize: '12px', fontWeight: '700', cursor: 'pointer',
+    color: '#9DB0D6', backgroundColor: 'rgba(10,20,50,0.55)', border: 'none',
+    borderRight: '1px solid rgba(160,190,255,0.2)',
+  },
+  pagerNumOn: { color: '#FFFFFF', backgroundColor: 'rgba(160,190,255,0.3)' },
   useBtn: {
     padding: '4px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: '800', cursor: 'pointer',
     color: '#0B1430', border: 'none', background: 'linear-gradient(180deg, #E4EEFF, #A9C4FF)',
