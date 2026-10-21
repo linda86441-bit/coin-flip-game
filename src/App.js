@@ -21,10 +21,6 @@ import { auth, db } from './firebase';
 const toInv = (v) => Array.isArray(v)
   ? v.reduce((a, n) => ({ ...a, [n]: (a[n] || 0) + 1 }), {})
   : (v ?? {});
-const invText = (inv) => {
-  const list = Object.keys(inv).filter((k) => inv[k] > 0).map((k) => `${k} ×${inv[k]}`);
-  return list.length > 0 ? list.join(', ') : '없음';
-};
 
 // 오류 안내 문구 (Firebase 사용량 초과 등)
 const errMsg = (e) =>
@@ -105,6 +101,7 @@ export default function App() {
   // 아이템 양도 상태
   const [targetItemUserId, setTargetItemUserId] = useState('');
   const [selectedItemToTransfer, setSelectedItemToTransfer] = useState('');
+  const [transferItemQty, setTransferItemQty] = useState(1);
 
   // 상점 아이템 목록 (이름/설명 수정됨)
   const shopItems = [
@@ -386,6 +383,16 @@ export default function App() {
       return;
     }
 
+    const qty = Math.floor(Number(transferItemQty));
+    if (!qty || qty < 1 || qty > 99) {
+      alert('양도할 개수를 1~99 사이로 입력해주세요.');
+      return;
+    }
+    if (qty > (inventory[selectedItemToTransfer] || 0)) {
+      alert('보유한 개수보다 많이 보낼 수 없어요.');
+      return;
+    }
+
     const currentDisplayId = user && user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
     if (cleanTargetId === currentDisplayId) {
       alert('본인 계정으로는 아이템을 보낼 수 없습니다.');
@@ -412,22 +419,24 @@ export default function App() {
 
         const myData = myDoc.data();
         const myInv = toInv(myData.inventory);
-        if ((myInv[selectedItemToTransfer] || 0) < 1) {
-          throw new Error("보유하지 않은 아이템입니다.");
+        if ((myInv[selectedItemToTransfer] || 0) < qty) {
+          throw new Error("보유한 개수가 부족합니다.");
         }
         const targetInv = toInv(targetDoc.data().inventory);
-        const newMyInv = { ...myInv, [selectedItemToTransfer]: myInv[selectedItemToTransfer] - 1 };
-        const newTargetInv = { ...targetInv, [selectedItemToTransfer]: (targetInv[selectedItemToTransfer] || 0) + 1 };
+        const newMyInv = { ...myInv, [selectedItemToTransfer]: myInv[selectedItemToTransfer] - qty };
+        const newTargetInv = { ...targetInv, [selectedItemToTransfer]: (targetInv[selectedItemToTransfer] || 0) + qty };
 
-        transaction.update(myDocRef, { inventory: newMyInv });
+        const logRef = doc(collection(db, 'transfers'));
+        transaction.update(myDocRef, { inventory: newMyInv, lastLogId: logRef.id });
         transaction.update(targetDocRef, { inventory: newTargetInv });
-        transaction.set(doc(collection(db, 'transfers')), {
+        transaction.set(logRef, {
           type: 'item',
           fromUid: user.uid,
           fromId: currentDisplayId,
           toUid: targetDoc.id,
           toId: cleanTargetId,
           item: selectedItemToTransfer,
+          qty,
           createdAt: serverTimestamp()
         });
 
@@ -435,12 +444,49 @@ export default function App() {
       });
       if (invAfter !== null) setInventory(invAfter);
 
-      alert(`[${cleanTargetId}] 님에게 [${selectedItemToTransfer}] 아이템을 전달했습니다!`);
+      alert(`[${cleanTargetId}] 님에게 [${selectedItemToTransfer}] ${qty}개를 전달했습니다!`);
       setTargetItemUserId('');
       setSelectedItemToTransfer('');
+      setTransferItemQty(1);
     } catch (error) {
       console.error("아이템 양도 실패:", error);
       alert(`아이템 양도 실패: ${errMsg(error)}`);
+    }
+  };
+
+  // 아이템 사용: 개수 1 차감 + 사용 기록 저장 (되돌릴 수 없음)
+  const handleUseItem = async (itemName) => {
+    if ((inventory[itemName] || 0) < 1) return;
+    if (!window.confirm(`[${itemName}] 1개를 사용할까요?\n사용하면 되돌릴 수 없어요.`)) return;
+
+    try {
+      const myDocRef = doc(db, 'users', user.uid);
+      const currentDisplayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+      let invAfter = null;
+      await runTransaction(db, async (transaction) => {
+        const myDoc = await transaction.get(myDocRef);
+        if (!myDoc.exists()) throw new Error('내 계정 정보를 찾을 수 없습니다.');
+        const myInv = toInv(myDoc.data().inventory);
+        if ((myInv[itemName] || 0) < 1) throw new Error('보유하지 않은 아이템입니다.');
+        const newInv = { ...myInv, [itemName]: myInv[itemName] - 1 };
+
+        const logRef = doc(collection(db, 'transfers'));
+        transaction.update(myDocRef, { inventory: newInv, lastLogId: logRef.id });
+        transaction.set(logRef, {
+          type: 'use',
+          fromUid: user.uid,
+          fromId: currentDisplayId,
+          item: itemName,
+          qty: 1,
+          createdAt: serverTimestamp()
+        });
+        invAfter = newInv;
+      });
+      if (invAfter !== null) setInventory(invAfter);
+      alert(`[${itemName}]을(를) 사용했어요.`);
+    } catch (error) {
+      console.error('아이템 사용 실패:', error);
+      alert(`아이템 사용 실패: ${errMsg(error)}`);
     }
   };
 
@@ -584,7 +630,18 @@ export default function App() {
             </div>
             <div style={{ ...styles.infoRow, alignItems: 'flex-start' }}>
               <span style={{ whiteSpace: 'nowrap' }}>보유 아이템</span>
-              <b style={{ textAlign: 'right', lineHeight: 1.5 }}>{invText(inventory)}</b>
+              {hasItems ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
+                  {Object.keys(inventory).filter((k) => inventory[k] > 0).map((name) => (
+                    <div key={name} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <b style={{ color: '#FFFFFF' }}>{name} ×{inventory[name]}</b>
+                      <button onClick={() => handleUseItem(name)} style={styles.useBtn}>사용</button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <b style={{ color: '#FFFFFF' }}>없음</b>
+              )}
             </div>
           </>
         )}
@@ -602,15 +659,15 @@ export default function App() {
             ) : (
               history.map((h) => {
                 const sent = h.fromUid === user.uid;
-                const what = h.type !== 'item' ? `${(h.amount || 0).toLocaleString()} G` : `${h.item} ×1`;
+                const what = h.type === 'item' || h.type === 'use' ? `${h.item} ×${h.qty || 1}` : `${(h.amount || 0).toLocaleString()} G`;
                 const when = h.createdAt?.toDate
                   ? h.createdAt.toDate().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
                   : '';
                 return (
                   <div key={h.id} style={styles.historyRow}>
                     <div>
-                      <div style={{ fontWeight: '700', color: h.type === 'grant' ? '#FBBF24' : sent ? '#FF4D6D' : '#CFE0FF' }}>
-                        {h.type === 'grant' ? (sent ? `🎁 ${h.toId}에게 포인트 지급` : '🎁 포인트 지급') : sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`}
+                      <div style={{ fontWeight: '700', color: h.type === 'grant' ? '#FBBF24' : h.type === 'use' ? '#9DB0D6' : sent ? '#FF4D6D' : '#CFE0FF' }}>
+                        {h.type === 'use' ? `✓ ${h.item} 사용` : h.type === 'grant' ? (sent ? `🎁 ${h.toId}에게 포인트 지급` : '🎁 포인트 지급') : sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`}
                       </div>
                       <div style={{ fontSize: '11px', color: '#9DB0D6', marginTop: '2px' }}>{when}</div>
                     </div>
@@ -871,7 +928,7 @@ export default function App() {
                 {hasItems ? (
                   <select
                     value={selectedItemToTransfer}
-                    onChange={(e) => setSelectedItemToTransfer(e.target.value)}
+                    onChange={(e) => { setSelectedItemToTransfer(e.target.value); setTransferItemQty(1); }}
                     style={styles.input}
                   >
                     <option value="">-- 아이템을 선택하세요 --</option>
@@ -887,6 +944,41 @@ export default function App() {
                   </p>
                 )}
               </div>
+
+              {hasItems && selectedItemToTransfer && (
+                <div style={{ marginBottom: '20px', textAlign: 'left' }}>
+                  <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>
+                    보낼 개수 (최대 {Math.min(99, inventory[selectedItemToTransfer] || 0)}개)
+                  </label>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setTransferItemQty((q) => Math.max(1, (Number(q) || 1) - 1))}
+                      style={styles.qtyBtn}
+                    >−</button>
+                    <input
+                      type="number"
+                      min="1"
+                      value={transferItemQty}
+                      onChange={(e) => {
+                        const max = Math.min(99, inventory[selectedItemToTransfer] || 1);
+                        setTransferItemQty(Math.min(max, Math.max(1, Math.floor(Number(e.target.value)) || 1)));
+                      }}
+                      style={styles.qtyInput}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setTransferItemQty((q) => Math.min(Math.min(99, inventory[selectedItemToTransfer] || 1), (Number(q) || 1) + 1))}
+                      style={styles.qtyBtn}
+                    >+</button>
+                    <button
+                      type="button"
+                      onClick={() => setTransferItemQty(Math.min(99, inventory[selectedItemToTransfer] || 1))}
+                      style={{ ...styles.qtyBtn, width: 'auto', padding: '0 12px', fontSize: '12px' }}
+                    >최대</button>
+                  </div>
+                </div>
+              )}
 
               <button
                 type="submit"
@@ -1009,6 +1101,10 @@ const styles = {
   buyBtn: {
     width: '100%', border: 'none', borderRadius: '4px', padding: '10px 6px', color: '#0B1430',
     fontSize: '12px', fontWeight: '800', background: 'linear-gradient(180deg, #E4EEFF, #A9C4FF)',
+  },
+  useBtn: {
+    padding: '4px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: '800', cursor: 'pointer',
+    color: '#0B1430', border: 'none', background: 'linear-gradient(180deg, #E4EEFF, #A9C4FF)',
   },
   logoutBtn: {
     backgroundColor: 'transparent', border: '1px solid rgba(160,190,255,0.3)', color: '#CFE0FF',
