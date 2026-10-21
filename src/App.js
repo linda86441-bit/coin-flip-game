@@ -82,6 +82,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [buyQty, setBuyQty] = useState({});
+  const [imgFailed, setImgFailed] = useState({}); // 이미지 파일이 없는 아이템 (이모지로 대체)
 
   // 날짜가 바뀌었으면 자동으로 하루 횟수로 초기화된 값으로 계산
   const currentRemaining = lastPlayDate === getTodayString() ? remainingGames : DAILY_GAMES;
@@ -754,14 +755,15 @@ export default function App() {
                 <div key={item.id} style={styles.shopCard}>
                   <div style={styles.priceTag}>{item.price.toLocaleString()}</div>
                   <div style={styles.thumb}>
-                    <span>{item.icon || '🎁'}</span>
-                    {item.img && (
+                    {item.img && !imgFailed[item.id] ? (
                       <img
                         src={`${process.env.PUBLIC_URL}/images/${item.img}`}
                         alt={item.name}
                         style={styles.thumbImg}
-                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                        onError={() => setImgFailed((prev) => ({ ...prev, [item.id]: true }))}
                       />
+                    ) : (
+                      <span>{item.icon || '🎁'}</span>
                     )}
                   </div>
                   <div style={{ fontWeight: '800', fontSize: '14px' }}>{item.name}</div>
@@ -988,7 +990,7 @@ const styles = {
     backgroundColor: 'rgba(40,62,130,0.45)', border: '1px solid rgba(160,190,255,0.25)',
   },
   priceTag: { position: 'absolute', top: '14px', right: '16px', fontSize: '13px', fontWeight: '800', color: '#FBBF24' },
-  thumbImg: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' },
+  thumbImg: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' },
   thumb: {
     position: 'relative', overflow: 'hidden', height: '96px', borderRadius: '3px', marginBottom: '8px', fontSize: '42px',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
