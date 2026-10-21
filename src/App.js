@@ -26,31 +26,41 @@ const invText = (inv) => {
   return list.length > 0 ? list.join(', ') : '없음';
 };
 
+// 오류 안내 문구 (Firebase 사용량 초과 등)
+const errMsg = (e) =>
+  e && e.code === 'resource-exhausted'
+    ? '접속자가 많아 지금은 처리할 수 없어요. 잠시 후 다시 시도해 주세요.'
+    : (e && e.message) || '알 수 없는 오류가 발생했어요.';
+
 // 하루에 주어지는 동전 던지기 횟수
 const DAILY_GAMES = 5;
 
 // 오늘 날짜 문자열 (예: 2026-10-20) - 한국 시간(KST) 기준
 const getTodayString = () => new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
 
-// 전역 CSS (폰트, 애니메이션)
+// 전역 CSS (폰트, 레이아웃, 애니메이션)
 const globalCss = `
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css');
-body { margin: 0; background: #0A0A0B; }
+body {
+  margin: 0; background-attachment: fixed;
+  background:
+    radial-gradient(ellipse at 25% 0%, #33509F 0%, rgba(51,80,159,0) 55%),
+    radial-gradient(ellipse at 90% 95%, #22388A 0%, rgba(34,56,138,0) 50%),
+    #0B1330;
+}
 * { font-family: 'Pretendard', -apple-system, 'Segoe UI', 'Noto Sans KR', sans-serif; }
 @keyframes coinSpin {
   0%   { transform: perspective(600px) rotateY(0deg) translateY(0); }
   50%  { transform: perspective(600px) rotateY(900deg) translateY(-44px); }
   100% { transform: perspective(600px) rotateY(1800deg) translateY(0); }
 }
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .coin-flip { animation: coinSpin 0.8s ease-in-out; }
+.app { display: flex; flex-direction: column; align-items: stretch; gap: 12px; }
 button { transition: transform .12s ease, filter .12s ease; }
-button:not(:disabled):hover { filter: brightness(1.1); }
+button:not(:disabled):hover { filter: brightness(1.12); }
 button:not(:disabled):active { transform: scale(.97); }
-input:focus, select:focus { border-color: #C6FF3D !important; }
+input:focus, select:focus { border-color: #CFE0FF !important; }
 `;
 
 export default function App() {
@@ -69,6 +79,9 @@ export default function App() {
   const [remainingGames, setRemainingGames] = useState(5);
   const [inventory, setInventory] = useState({});
   const [lastPlayDate, setLastPlayDate] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [buyQty, setBuyQty] = useState({});
 
   // 날짜가 바뀌었으면 자동으로 하루 횟수로 초기화된 값으로 계산
   const currentRemaining = lastPlayDate === getTodayString() ? remainingGames : DAILY_GAMES;
@@ -94,9 +107,10 @@ export default function App() {
 
   // 상점 아이템 목록 (이름/설명 수정됨)
   const shopItems = [
-    { id: 'item_01', name: '테스트템1', price: 500, desc: '아이템 설명 적는 곳.' },
-    { id: 'item_02', name: '테스트템2', price: 1200, desc: '아이템 설명 적는 곳.' },
-    { id: 'item_03', name: '테스트템3', price: 300, desc: '아이템 설명 적는 곳.' },
+    // img: public/images 폴더에 넣은 파일 이름 (파일이 없으면 icon 이모지가 대신 보입니다)
+    { id: 'item_01', name: '테스트템1', price: 500, desc: '아이템 설명 적는 곳.', img: 'item1.png', icon: '🎁' },
+    { id: 'item_02', name: '테스트템2', price: 1200, desc: '아이템 설명 적는 곳.', img: 'item2.png', icon: '🎁' },
+    { id: 'item_03', name: '테스트템3', price: 300, desc: '아이템 설명 적는 곳.', img: 'item3.png', icon: '🎁' },
   ];
 
   // 한글 아이디를 이메일 형식으로 변환
@@ -107,6 +121,7 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         setUser(currentUser);
+        setLoadError(false);
         try {
           const userDocRef = doc(db, 'users', currentUser.uid);
           const userDoc = await getDoc(userDocRef);
@@ -119,6 +134,7 @@ export default function App() {
             const data = userDoc.data();
             setGold(data.gold ?? 1000);
             setInventory(toInv(data.inventory));
+            setIsAdmin(data.isAdmin === true);
 
             if (data.lastPlayDate === today) {
               // 오늘 이미 접속한 기록이 있으면 저장된 횟수 사용
@@ -148,6 +164,7 @@ export default function App() {
           }
         } catch (error) {
           console.error("데이터 불러오기 에러:", error);
+          setLoadError(true);
         }
       } else {
         setUser(null);
@@ -187,7 +204,7 @@ export default function App() {
       alert('오늘 남은 게임 횟수가 없습니다!');
       return;
     }
-    if (betAmount <= 0 || betAmount > gold) {
+    if (betAmount <= 0 || (!isAdmin && betAmount > gold)) {
       alert('베팅 금액을 다시 확인해 주세요.');
       return;
     }
@@ -200,66 +217,85 @@ export default function App() {
       const coinResult = Math.random() < 0.5 ? 'front' : 'back';
       const isWin = selectedChoice === coinResult;
       const sideName = coinResult === 'front' ? '앞면(해)' : '뒷면(달)';
-      
-      setCurrentCoinDisplay(coinResult === 'front' ? 'FRONT' : 'BACK');
 
       let newGold = gold;
+      let message;
+      let type;
       if (isWin) {
         const winGold = betAmount;
         newGold += winGold * 2;
-        setResultMessage(`🎉 축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`);
-        setResultType('win');
+        message = `🎉 축하합니다! 동전은 [${sideName}]이었습니다. +${winGold * 2} 골드 획득!`;
+        type = 'win';
       } else {
         newGold -= betAmount;
-        setResultMessage(`💀 아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`);
-        setResultType('lose');
+        message = `💀 아쉽네요! 동전은 [${sideName}]이었습니다. -${betAmount} 골드`;
+        type = 'lose';
       }
 
       const today = getTodayString();
+      if (isAdmin) newGold = gold; // 관리자는 골드 변화 없음
       const newRemainingGames = currentRemaining - 1;
 
+      // 저장에 성공한 뒤에만 화면에 반영 (실패하면 아무것도 바뀌지 않음)
+      if (user) {
+        try {
+          const userDocRef = doc(db, 'users', user.uid);
+          const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+          await setDoc(userDocRef, {
+            userId: displayId,
+            gold: newGold,
+            remainingGames: newRemainingGames,
+            lastPlayDate: today
+          }, { merge: true });
+        } catch (error) {
+          console.error('동전 던지기 저장 실패:', error);
+          alert(`저장에 실패해서 이번 게임은 기록되지 않았어요.\n${errMsg(error)}`);
+          setIsFlipping(false);
+          return;
+        }
+      }
+
+      setCurrentCoinDisplay(coinResult === 'front' ? 'FRONT' : 'BACK');
+      setResultMessage(message);
+      setResultType(type);
       setGold(newGold);
       setRemainingGames(newRemainingGames);
       setLastPlayDate(today);
       setIsFlipping(false);
-
-      if (user) {
-        const userDocRef = doc(db, 'users', user.uid);
-        const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
-        await setDoc(userDocRef, {
-          userId: displayId,
-          gold: newGold,
-          remainingGames: newRemainingGames,
-          lastPlayDate: today
-        }, { merge: true });
-      }
     }, 800);
   };
 
   // 아이템 구매 로직
-  const handleBuyItem = async (item) => {
-    if (gold < item.price) {
+  const handleBuyItem = async (item, qty = 1) => {
+    const totalPrice = item.price * qty;
+    if (!isAdmin && gold < totalPrice) {
       alert('골드가 부족합니다!');
       return;
     }
 
 
-    const newGold = gold - item.price;
-    const newInventory = { ...inventory, [item.name]: (inventory[item.name] || 0) + 1 };
+    const newGold = isAdmin ? gold : gold - totalPrice;
+    const newInventory = { ...inventory, [item.name]: (inventory[item.name] || 0) + qty };
+
+    if (user) {
+      try {
+        const userDocRef = doc(db, 'users', user.uid);
+        const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
+        await setDoc(userDocRef, {
+          userId: displayId,
+          gold: newGold,
+          inventory: newInventory
+        }, { merge: true });
+      } catch (error) {
+        console.error('구매 저장 실패:', error);
+        alert(`구매에 실패했어요. 골드는 차감되지 않았어요.\n${errMsg(error)}`);
+        return;
+      }
+    }
 
     setGold(newGold);
     setInventory(newInventory);
-
-    if (user) {
-      const userDocRef = doc(db, 'users', user.uid);
-      const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
-      await setDoc(userDocRef, {
-        userId: displayId,
-        gold: newGold,
-        inventory: newInventory
-      }, { merge: true });
-      alert(`[${item.name}]을(를) 성공적으로 구매하셨습니다!`);
-    }
+    alert(`[${item.name}] ${qty}개를 성공적으로 구매하셨습니다!`);
   };
 
   // 골드 양도(송금) 로직
@@ -278,7 +314,7 @@ export default function App() {
       return;
     }
 
-    if (transferAmount <= 0 || transferAmount > gold) {
+    if (transferAmount <= 0 || (!isAdmin && transferAmount > gold)) {
       alert('양도할 골드 수량을 다시 확인해주세요.');
       return;
     }
@@ -296,23 +332,24 @@ export default function App() {
       const targetDocRef = targetDoc.ref;
       const myDocRef = doc(db, 'users', user.uid);
 
+      let goldAfter = null;
       await runTransaction(db, async (transaction) => {
         const myDoc = await transaction.get(myDocRef);
         if (!myDoc.exists()) throw new Error("내 계정 정보를 찾을 수 없습니다.");
 
         const myData = myDoc.data();
-        if ((myData.gold ?? 0) < transferAmount) {
+        if (!isAdmin && (myData.gold ?? 0) < transferAmount) {
           throw new Error("골드가 부족합니다.");
         }
 
         const targetData = targetDoc.data();
-        const newMyGold = (myData.gold ?? 0) - transferAmount;
+        const newMyGold = isAdmin ? (myData.gold ?? 0) : (myData.gold ?? 0) - transferAmount;
         const newTargetGold = (targetData.gold ?? 0) + transferAmount;
 
-        transaction.update(myDocRef, { gold: newMyGold });
+        if (!isAdmin) transaction.update(myDocRef, { gold: newMyGold });
         transaction.update(targetDocRef, { gold: newTargetGold });
         transaction.set(doc(collection(db, 'transfers')), {
-          type: 'gold',
+          type: isAdmin ? 'grant' : 'gold',
           fromUid: user.uid,
           fromId: currentDisplayId,
           toUid: targetDoc.id,
@@ -321,14 +358,15 @@ export default function App() {
           createdAt: serverTimestamp()
         });
 
-        setGold(newMyGold);
+        goldAfter = newMyGold;
       });
+      if (goldAfter !== null) setGold(goldAfter);
 
       alert(`[${cleanTargetId}] 님에게 ${transferAmount.toLocaleString()} G를 성공적으로 전달했습니다!`);
       setTargetUserId('');
     } catch (error) {
       console.error("골드 양도 실패:", error);
-      alert(`골드 양도 실패: ${error.message}`);
+      alert(`골드 양도 실패: ${errMsg(error)}`);
     }
   };
 
@@ -366,6 +404,7 @@ export default function App() {
       const targetDocRef = targetDoc.ref;
       const myDocRef = doc(db, 'users', user.uid);
 
+      let invAfter = null;
       await runTransaction(db, async (transaction) => {
         const myDoc = await transaction.get(myDocRef);
         if (!myDoc.exists()) throw new Error("내 계정 정보를 찾을 수 없습니다.");
@@ -391,25 +430,32 @@ export default function App() {
           createdAt: serverTimestamp()
         });
 
-        setInventory(newMyInv);
+        invAfter = newMyInv;
       });
+      if (invAfter !== null) setInventory(invAfter);
 
       alert(`[${cleanTargetId}] 님에게 [${selectedItemToTransfer}] 아이템을 전달했습니다!`);
       setTargetItemUserId('');
       setSelectedItemToTransfer('');
     } catch (error) {
       console.error("아이템 양도 실패:", error);
-      alert(`아이템 양도 실패: ${error.message}`);
+      alert(`아이템 양도 실패: ${errMsg(error)}`);
     }
   };
+
+  const setQty = (id, v) =>
+    setBuyQty((prev) => ({ ...prev, [id]: Math.min(99, Math.max(1, Math.floor(v) || 1)) }));
 
   // 양도 내역
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [sidePanel, setSidePanel] = useState('info'); // 'info' | 'history'
 
   const loadHistory = async () => {
     if (!user) return;
     setHistoryLoading(true);
+    setHistoryError(false);
     try {
       const [sent, received] = await Promise.all([
         getDocs(query(collection(db, 'transfers'), where('fromUid', '==', user.uid))),
@@ -420,14 +466,15 @@ export default function App() {
       setHistory(list.slice(0, 50));
     } catch (error) {
       console.error('양도 내역 불러오기 실패:', error);
+      setHistoryError(true);
     }
     setHistoryLoading(false);
   };
 
   useEffect(() => {
-    if (activeTab === 'transfer' && transferType === 'history') loadHistory();
+    if (sidePanel === 'history') loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, transferType, user]);
+  }, [sidePanel, user]);
 
   const hasItems = Object.values(inventory).some((c) => c > 0);
   const displayUserId = user && user.email ? decodeURIComponent(user.email.split('@')[0]) : '플레이어';
@@ -436,14 +483,33 @@ export default function App() {
     return <div style={{ color: '#fff', textAlign: 'center', marginTop: '50px' }}>로딩 중...</div>;
   }
 
+  // 데이터 불러오기 실패 화면 (기본값을 보여주지 않고 이용을 막음)
+  if (user && loadError) {
+    return (
+      <div style={styles.container}>
+        <style>{globalCss}</style>
+        <div style={{ ...styles.gameCard, maxWidth: '380px' }}>
+          <div style={{ fontSize: '32px', marginBottom: '8px' }}>⚠️</div>
+          <h1 style={{ fontSize: '20px', fontWeight: 'bold', marginBottom: '8px' }}>데이터를 불러오지 못했어요</h1>
+          <p style={{ ...styles.subtitle, lineHeight: 1.6, textAlign: 'center' }}>
+            접속자가 많거나 일시적인 문제일 수 있어요.<br />
+            내 골드와 아이템은 안전하게 저장되어 있으니 잠시 후 다시 시도해 주세요.
+          </p>
+          <button onClick={() => window.location.reload()} style={styles.actionBtn}>다시 시도</button>
+          <button onClick={handleLogout} style={{ ...styles.logoutBtn, marginTop: '12px' }}>로그아웃</button>
+        </div>
+      </div>
+    );
+  }
+
   // 로그인 화면
   if (!user) {
     return (
       <div style={styles.container}>
       <style>{globalCss}</style>
-        <div style={styles.gameCard}>
-          <div style={{ fontSize: '32px', marginBottom: '8px' }}>🎲</div>
-          <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '4px' }}>카지노 로그인</h1>
+        <div style={{ ...styles.gameCard, maxWidth: '380px' }}>
+          <div style={{ fontSize: '32px', marginBottom: '8px' }}>🛒</div>
+          <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '4px' }}>SHOP 로그인</h1>
           <p style={styles.subtitle}>발급받은 아이디로 로그인하세요</p>
 
           <form onSubmit={handleLoginSubmit} style={{ width: '100%' }}>
@@ -479,34 +545,91 @@ export default function App() {
 
   // 로그인 후 메인 화면
   return (
-    <div style={styles.container}>
+    <div className="app" style={styles.pageBg}>
       <style>{globalCss}</style>
-      {/* 상단 프로필 영역 */}
-      <div style={{ width: '100%', maxWidth: '380px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-        <span style={{ fontSize: '13px', color: '#8A8A93' }}>
-          접속 계정: <strong style={{ color: '#FBBF24' }}>{displayUserId}</strong>
-        </span>
-        <button onClick={handleLogout} style={styles.logoutBtn}>로그아웃</button>
+      {/* 상단 헤더 */}
+      <div className="hdr" style={styles.header}>
+        <div style={styles.headerTitle}>SHOP</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{ fontSize: '12px', color: '#9DB0D6' }}>
+            {displayUserId}{isAdmin && <span style={styles.adminBadge}>ADMIN</span>}
+          </span>
+          <button onClick={handleLogout} style={styles.logoutBtn}>로그아웃</button>
+        </div>
       </div>
 
-      {/* 보유 골드 & 인벤토리 대시보드 */}
-      <div style={styles.dashboardCard}>
-        <div style={styles.goldText}>
-          보유 골드: <span style={{ color: '#FBBF24', fontSize: '34px', fontWeight: '800' }}>{gold.toLocaleString()} G</span>
+      {/* 내 정보 / 내역 패널 */}
+      <div className="side" style={styles.dashboardCard}>
+        <div style={{ display: 'flex', gap: '4px', marginBottom: '10px' }}>
+          <button
+            onClick={() => setSidePanel('info')}
+            style={{ ...styles.infoLabel, ...(sidePanel === 'info' ? styles.infoLabelOn : null) }}
+          >
+            내 정보
+          </button>
+          <button
+            onClick={() => setSidePanel('history')}
+            style={{ ...styles.infoLabel, ...(sidePanel === 'history' ? styles.infoLabelOn : null) }}
+          >
+            📜 내역
+          </button>
         </div>
-        <div style={{ fontSize: '12px', color: '#9A9AA3', marginTop: '6px' }}>
-          🎒 보유 아이템: {invText(inventory)}
-        </div>
+
+        {sidePanel === 'info' && (
+          <>
+            <div style={styles.infoRow}>
+              <span>보유 골드</span>
+              <b style={{ color: '#FBBF24', fontSize: '18px' }}>{isAdmin ? '∞ 무제한' : `${gold.toLocaleString()} G`}</b>
+            </div>
+            <div style={{ ...styles.infoRow, alignItems: 'flex-start' }}>
+              <span style={{ whiteSpace: 'nowrap' }}>보유 아이템</span>
+              <b style={{ textAlign: 'right', lineHeight: 1.5 }}>{invText(inventory)}</b>
+            </div>
+          </>
+        )}
+
+        {sidePanel === 'history' && (
+          <div style={{ maxHeight: '260px', overflowY: 'auto' }}>
+            {historyLoading ? (
+              <p style={{ ...styles.subText, textAlign: 'center' }}>불러오는 중...</p>
+            ) : historyError ? (
+              <p style={{ ...styles.subText, textAlign: 'center', color: '#FF4D6D' }}>
+                내역을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.
+              </p>
+            ) : history.length === 0 ? (
+              <p style={{ ...styles.subText, textAlign: 'center' }}>내역이 없습니다.</p>
+            ) : (
+              history.map((h) => {
+                const sent = h.fromUid === user.uid;
+                const what = h.type !== 'item' ? `${(h.amount || 0).toLocaleString()} G` : `${h.item} ×1`;
+                const when = h.createdAt?.toDate
+                  ? h.createdAt.toDate().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                  : '';
+                return (
+                  <div key={h.id} style={styles.historyRow}>
+                    <div>
+                      <div style={{ fontWeight: '700', color: h.type === 'grant' ? '#FBBF24' : sent ? '#FF4D6D' : '#CFE0FF' }}>
+                        {h.type === 'grant' ? (sent ? `🎁 ${h.toId}에게 포인트 지급` : '🎁 포인트 지급') : sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`}
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#9DB0D6', marginTop: '2px' }}>{when}</div>
+                    </div>
+                    <div style={{ fontWeight: '800' }}>{sent && h.type !== 'grant' ? '-' : '+'}{what}</div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
       </div>
 
       {/* 메뉴 탭 */}
-      <div style={styles.tabGroup}>
+      <div className="main" style={styles.tabGroup}>
         <button
           onClick={() => setActiveTab('game')}
           style={{
             ...styles.tabBtn,
-            backgroundColor: activeTab === 'game' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-            color: activeTab === 'game' ? '#C6FF3D' : '#8A8A93',
+            backgroundColor: activeTab === 'game' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+            color: activeTab === 'game' ? '#CFE0FF' : '#9DB0D6',
           }}
         >
           🎲 게임
@@ -515,8 +638,8 @@ export default function App() {
           onClick={() => setActiveTab('shop')}
           style={{
             ...styles.tabBtn,
-            backgroundColor: activeTab === 'shop' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-            color: activeTab === 'shop' ? '#C6FF3D' : '#8A8A93',
+            backgroundColor: activeTab === 'shop' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+            color: activeTab === 'shop' ? '#CFE0FF' : '#9DB0D6',
           }}
         >
           🛒 상점
@@ -525,8 +648,8 @@ export default function App() {
           onClick={() => setActiveTab('transfer')}
           style={{
             ...styles.tabBtn,
-            backgroundColor: activeTab === 'transfer' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-            color: activeTab === 'transfer' ? '#C6FF3D' : '#8A8A93',
+            backgroundColor: activeTab === 'transfer' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+            color: activeTab === 'transfer' ? '#CFE0FF' : '#9DB0D6',
           }}
         >
           💸 양도
@@ -535,16 +658,23 @@ export default function App() {
 
       {/* TAB 1: 게임 */}
       {activeTab === 'game' && (
-        <div style={styles.gameCard}>
+        <div className="main" style={styles.gameCard}>
           <div style={styles.gameTitle}>[ 동전 던지기 ]</div>
 
           <div style={{
-            fontSize: '13px',
-            fontWeight: 'bold',
-            marginBottom: '4px',
-            color: currentRemaining > 0 ? '#C6FF3D' : '#FF4D6D',
+            display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '6px 14px',
+            borderRadius: '4px', fontSize: '13px', fontWeight: '700',
+            backgroundColor: 'rgba(8,15,40,0.7)', border: '1px solid rgba(160,190,255,0.25)',
+            color: currentRemaining > 0 ? '#CFE0FF' : '#FF4D6D',
           }}>
-            🎟️ 오늘 남은 횟수: {currentRemaining}회
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+              오늘 남은 횟수
+            </span>
+            <b style={{ fontSize: '16px', color: currentRemaining > 0 ? '#FFFFFF' : '#FF4D6D' }}>{currentRemaining}회</b>
           </div>
 
           <div className={isFlipping ? 'coin coin-flip' : 'coin'} style={styles.coinCircle}>
@@ -557,8 +687,8 @@ export default function App() {
               onClick={() => { setSelectedChoice('front'); setCurrentCoinDisplay('FRONT'); }}
               style={{
                 ...styles.choiceBtn,
-                backgroundColor: selectedChoice === 'front' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-                borderColor: selectedChoice === 'front' ? '#C6FF3D' : '#26262B',
+                backgroundColor: selectedChoice === 'front' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+                borderColor: selectedChoice === 'front' ? '#CFE0FF' : 'rgba(160,190,255,0.22)',
               }}
             >
               ☀️ 앞면 (해)
@@ -567,8 +697,8 @@ export default function App() {
               onClick={() => { setSelectedChoice('back'); setCurrentCoinDisplay('BACK'); }}
               style={{
                 ...styles.choiceBtn,
-                backgroundColor: selectedChoice === 'back' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-                borderColor: selectedChoice === 'back' ? '#C6FF3D' : '#26262B',
+                backgroundColor: selectedChoice === 'back' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+                borderColor: selectedChoice === 'back' ? '#CFE0FF' : 'rgba(160,190,255,0.22)',
               }}
             >
               🌙 뒷면 (달)
@@ -610,34 +740,51 @@ export default function App() {
 
       {/* TAB 2: 상점 */}
       {activeTab === 'shop' && (
-        <div style={styles.gameCard}>
+        <div className="main" style={styles.gameCard}>
           <div style={styles.gameTitle}>[ 아이템 상점 ]</div>
           <p style={styles.subText}>골드를 사용하여 필요한 아이템을 구매하세요</p>
 
-          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '12px' }}>
+          <div style={styles.shopGrid}>
             {shopItems.map((item) => {
               const owned = inventory[item.name] || 0;
-              const cantBuy = gold < item.price;
+              const qty = buyQty[item.id] || 1;
+              const total = item.price * qty;
+              const cantBuy = !isAdmin && gold < total;
               return (
-                <div key={item.id} style={styles.itemCard}>
-                  <div>
-                    <div style={{ fontWeight: 'bold', fontSize: '15px' }}>{item.name}</div>
-                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{item.desc}</div>
-                    <div style={{ fontSize: '13px', color: '#FBBF24', fontWeight: 'bold', marginTop: '4px' }}>
-                      {item.price.toLocaleString()} G<span style={{ color: '#8A8A93', fontWeight: 'normal', marginLeft: '6px' }}>· 보유 {owned}개</span>
-                    </div>
+                <div key={item.id} style={styles.shopCard}>
+                  <div style={styles.priceTag}>{item.price.toLocaleString()}</div>
+                  <div style={styles.thumb}>
+                    <span>{item.icon || '🎁'}</span>
+                    {item.img && (
+                      <img
+                        src={`${process.env.PUBLIC_URL}/images/${item.img}`}
+                        alt={item.name}
+                        style={styles.thumbImg}
+                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                      />
+                    )}
+                  </div>
+                  <div style={{ fontWeight: '800', fontSize: '14px' }}>{item.name}</div>
+                  <div style={{ fontSize: '11px', color: '#9DB0D6', margin: '2px 0 4px' }}>{item.desc}</div>
+                  <div style={{ fontSize: '11px', color: '#CFE0FF', marginBottom: '8px' }}>보유 {owned}개</div>
+                  <div style={styles.qtyRow}>
+                    <button onClick={() => setQty(item.id, qty - 1)} style={styles.qtyBtn}>−</button>
+                    <input
+                      type="number"
+                      min="1"
+                      max="99"
+                      value={qty}
+                      onChange={(e) => setQty(item.id, Number(e.target.value))}
+                      style={styles.qtyInput}
+                    />
+                    <button onClick={() => setQty(item.id, qty + 1)} style={styles.qtyBtn}>+</button>
                   </div>
                   <button
-                    onClick={() => handleBuyItem(item)}
+                    onClick={() => handleBuyItem(item, qty)}
                     disabled={cantBuy}
-                    style={{
-                      ...styles.buyBtn,
-                      backgroundColor: cantBuy ? '#2A2A30' : '#C6FF3D',
-                      color: cantBuy ? '#8A8A93' : '#0A0A0B',
-                      cursor: cantBuy ? 'not-allowed' : 'pointer',
-                    }}
+                    style={{ ...styles.buyBtn, opacity: cantBuy ? 0.45 : 1, cursor: cantBuy ? 'not-allowed' : 'pointer' }}
                   >
-                    구매
+                    {isAdmin ? `${qty}개 구매 (무료)` : `${qty}개 구매 · ${total.toLocaleString()} G`}
                   </button>
                 </div>
               );
@@ -648,7 +795,7 @@ export default function App() {
 
       {/* TAB 3: 양도 센터 */}
       {activeTab === 'transfer' && (
-        <div style={styles.gameCard}>
+        <div className="main" style={styles.gameCard}>
           <div style={styles.gameTitle}>[ 양도 센터 ]</div>
 
           <div style={{ display: 'flex', gap: '6px', width: '100%', marginBottom: '16px' }}>
@@ -656,62 +803,24 @@ export default function App() {
               onClick={() => setTransferType('gold')}
               style={{
                 ...styles.subTabBtn,
-                backgroundColor: transferType === 'gold' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-                color: transferType === 'gold' ? '#C6FF3D' : '#8A8A93',
+                backgroundColor: transferType === 'gold' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+                color: transferType === 'gold' ? '#CFE0FF' : '#9DB0D6',
               }}
             >
-              💰 골드 양도
+              {isAdmin ? '🎁 포인트 지급' : '💰 골드 양도'}
             </button>
             <button
               onClick={() => setTransferType('item')}
               style={{
                 ...styles.subTabBtn,
-                backgroundColor: transferType === 'item' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-                color: transferType === 'item' ? '#C6FF3D' : '#8A8A93',
+                backgroundColor: transferType === 'item' ? 'rgba(160,190,255,0.22)' : 'rgba(10,20,50,0.55)',
+                color: transferType === 'item' ? '#CFE0FF' : '#9DB0D6',
               }}
             >
               🎒 아이템 양도
             </button>
-            <button
-              onClick={() => setTransferType('history')}
-              style={{
-                ...styles.subTabBtn,
-                backgroundColor: transferType === 'history' ? 'rgba(198,255,61,0.12)' : '#1B1B1F',
-                color: transferType === 'history' ? '#C6FF3D' : '#8A8A93',
-              }}
-            >
-              📜 내역
-            </button>
           </div>
 
-          {transferType === 'history' && (
-            <div style={{ width: '100%' }}>
-              {historyLoading ? (
-                <p style={{ ...styles.subText, textAlign: 'center' }}>불러오는 중...</p>
-              ) : history.length === 0 ? (
-                <p style={{ ...styles.subText, textAlign: 'center' }}>양도 내역이 없습니다.</p>
-              ) : (
-                history.map((h) => {
-                  const sent = h.fromUid === user.uid;
-                  const what = h.type === 'gold' ? `${(h.amount || 0).toLocaleString()} G` : `${h.item} ×1`;
-                  const when = h.createdAt?.toDate
-                    ? h.createdAt.toDate().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                    : '';
-                  return (
-                    <div key={h.id} style={styles.historyRow}>
-                      <div>
-                        <div style={{ fontWeight: '700', color: sent ? '#FF4D6D' : '#C6FF3D' }}>
-                          {sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`}
-                        </div>
-                        <div style={{ fontSize: '11px', color: '#8A8A93', marginTop: '2px' }}>{when}</div>
-                      </div>
-                      <div style={{ fontWeight: '800' }}>{sent ? '-' : '+'}{what}</div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
 
           {transferType === 'gold' && (
             <form onSubmit={handleTransferGold} style={{ width: '100%' }}>
@@ -727,7 +836,7 @@ export default function App() {
               </div>
 
               <div style={{ marginBottom: '20px', textAlign: 'left' }}>
-                <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>보낼 골드 수량</label>
+                <label style={{ fontSize: '12px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>{isAdmin ? '지급할 포인트' : '보낼 골드 수량'}</label>
                 <input
                   type="number"
                   value={transferAmount}
@@ -737,7 +846,7 @@ export default function App() {
               </div>
 
               <button type="submit" style={styles.actionBtn}>
-                골드 전달하기
+                {isAdmin ? '포인트 지급하기' : '골드 전달하기'}
               </button>
             </form>
           )}
@@ -796,85 +905,121 @@ export default function App() {
   );
 }
 
-const card = {
-  backgroundColor: '#141416',
-  border: '1px solid #26262B',
+const panel = {
+  backgroundColor: 'rgba(22,36,84,0.62)',
+  border: '1px solid rgba(160,190,255,0.25)',
+  borderRadius: '6px',
+  boxShadow: 'inset 0 0 0 3px rgba(10,20,50,0.35)',
 };
 
 const styles = {
   container: {
-    minHeight: '100vh', backgroundColor: '#0A0A0B', color: '#F5F5F7',
-    display: 'flex', flexDirection: 'column', alignItems: 'center',
-    padding: '24px 16px 110px', boxSizing: 'border-box',
+    minHeight: '100vh', color: '#FFFFFF', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'center', padding: '24px 16px', boxSizing: 'border-box',
   },
-  dashboardCard: {
-    ...card, width: '100%', maxWidth: '380px', borderRadius: '20px', padding: '22px',
-    marginBottom: '16px', textAlign: 'center', boxSizing: 'border-box',
+  pageBg: {
+    width: '100%', maxWidth: '380px', margin: '0 auto', padding: '16px 16px 48px',
+    boxSizing: 'border-box', color: '#FFFFFF', minHeight: '100vh',
   },
-  goldText: { fontSize: '13px', color: '#8A8A93', fontWeight: '600' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px 6px' },
+  headerTitle: { fontSize: '20px', fontWeight: '800', letterSpacing: '0.5px' },
+  adminBadge: {
+    marginLeft: '6px', padding: '2px 6px', borderRadius: '4px', fontSize: '10px',
+    fontWeight: '800', backgroundColor: '#FBBF24', color: '#0B1430',
+  },
+  dashboardCard: { ...panel, padding: '16px', boxSizing: 'border-box' },
+  infoLabel: {
+    padding: '6px 18px', fontWeight: '800', fontSize: '14px', cursor: 'pointer',
+    color: '#9DB0D6', backgroundColor: 'transparent', border: 'none', borderBottom: '2px solid transparent',
+  },
+  infoLabelOn: {
+    color: '#FFFFFF', backgroundColor: 'rgba(160,190,255,0.2)', borderBottom: '2px solid #CFE0FF',
+  },
+  infoRow: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
+    padding: '11px 4px', fontSize: '13px', color: '#9DB0D6',
+    borderBottom: '1px solid rgba(160,190,255,0.12)',
+  },
   tabGroup: {
-    position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)',
-    width: '100%', maxWidth: '440px', display: 'flex', gap: '8px', zIndex: 10,
-    padding: '10px 12px calc(10px + env(safe-area-inset-bottom, 0px))',
-    backgroundColor: '#0A0A0B', borderTop: '1px solid #26262B', boxSizing: 'border-box',
+    display: 'flex', width: '100%', boxSizing: 'border-box', backgroundColor: 'rgba(10,18,48,0.6)',
+    border: '1px solid rgba(160,190,255,0.25)', borderRadius: '6px', overflow: 'hidden',
   },
   tabBtn: {
-    flex: 1, padding: '13px 0', borderRadius: '14px', border: '1px solid transparent',
-    fontWeight: '700', fontSize: '13px', cursor: 'pointer',
+    flex: 1, padding: '14px 0', border: 'none', borderRadius: 0,
+    fontWeight: '700', fontSize: '14px', cursor: 'pointer',
   },
   subTabBtn: {
-    flex: 1, padding: '10px 0', borderRadius: '10px', border: '1px solid #26262B',
+    flex: 1, padding: '10px 0', borderRadius: '4px', border: '1px solid rgba(160,190,255,0.22)',
     fontWeight: '700', fontSize: '12px', cursor: 'pointer',
   },
   gameCard: {
-    ...card, width: '100%', maxWidth: '380px', borderRadius: '20px', padding: '26px',
-    display: 'flex', flexDirection: 'column', alignItems: 'center', boxSizing: 'border-box',
-    animation: 'fadeUp .3s ease both',
+    ...panel, width: '100%', padding: '22px', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', boxSizing: 'border-box', animation: 'fadeUp .3s ease both',
   },
-  gameTitle: { fontSize: '18px', fontWeight: '800', marginBottom: '8px', color: '#F5F5F7' },
-  subText: { fontSize: '12px', color: '#8A8A93' },
-  subtitle: { fontSize: '13px', color: '#8A8A93', marginBottom: '22px' },
+  gameTitle: { fontSize: '18px', fontWeight: '800', marginBottom: '8px', color: '#FFFFFF' },
+  subText: { fontSize: '12px', color: '#9DB0D6' },
+  subtitle: { fontSize: '13px', color: '#9DB0D6', marginBottom: '22px' },
   coinCircle: {
     width: '112px', height: '112px', borderRadius: '50%', backgroundColor: '#F5C451',
     border: '6px solid #E0A82E', boxShadow: 'inset 0 0 0 5px rgba(255,255,255,0.3)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontSize: '46px', margin: '20px 0', boxSizing: 'border-box',
   },
-  buttonGroup: { display: 'flex', gap: '10px', width: '100%', marginTop: '8px', marginBottom: '16px' },
+  buttonGroup: { display: 'flex', gap: '10px', width: '100%', maxWidth: '420px', marginTop: '8px', marginBottom: '16px' },
   choiceBtn: {
-    flex: 1, padding: '13px', borderRadius: '12px', color: '#F5F5F7',
-    fontWeight: '700', border: '1.5px solid #26262B', cursor: 'pointer', fontSize: '13px',
+    flex: 1, padding: '13px', borderRadius: '4px', color: '#FFFFFF',
+    fontWeight: '700', border: '1.5px solid rgba(160,190,255,0.22)', cursor: 'pointer', fontSize: '13px',
   },
   input: {
-    width: '100%', backgroundColor: '#0A0A0B', border: '1px solid #26262B',
-    borderRadius: '12px', padding: '14px', color: '#F5F5F7', fontSize: '16px',
+    width: '100%', backgroundColor: 'rgba(8,15,40,0.7)', border: '1px solid rgba(160,190,255,0.25)',
+    borderRadius: '4px', padding: '14px', color: '#FFFFFF', fontSize: '16px',
     fontWeight: '700', textAlign: 'center', boxSizing: 'border-box', outline: 'none',
   },
   actionBtn: {
-    width: '100%', backgroundColor: '#C6FF3D', border: 'none', borderRadius: '12px',
-    padding: '15px', color: '#0A0A0B', fontSize: '15px', fontWeight: '800', cursor: 'pointer',
+    width: '100%', maxWidth: '420px', background: 'linear-gradient(180deg, #E4EEFF, #A9C4FF)', border: 'none',
+    borderRadius: '4px', padding: '15px', color: '#0B1430', fontSize: '15px', fontWeight: '800', cursor: 'pointer',
+  },
+  shopGrid: {
+    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+    gap: '10px', width: '100%', marginTop: '14px',
+  },
+  shopCard: {
+    position: 'relative', padding: '10px', borderRadius: '4px', boxSizing: 'border-box',
+    backgroundColor: 'rgba(40,62,130,0.45)', border: '1px solid rgba(160,190,255,0.25)',
+  },
+  priceTag: { position: 'absolute', top: '14px', right: '16px', fontSize: '13px', fontWeight: '800', color: '#FBBF24' },
+  thumbImg: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' },
+  thumb: {
+    position: 'relative', overflow: 'hidden', height: '96px', borderRadius: '3px', marginBottom: '8px', fontSize: '42px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'linear-gradient(160deg, rgba(130,160,235,0.4), rgba(25,40,100,0.7))',
+  },
+  qtyRow: { display: 'flex', gap: '6px', marginBottom: '8px' },
+  qtyBtn: {
+    width: '32px', border: '1px solid rgba(160,190,255,0.3)', borderRadius: '4px',
+    backgroundColor: 'rgba(10,20,50,0.55)', color: '#FFFFFF', fontSize: '16px', fontWeight: '800', cursor: 'pointer',
+  },
+  qtyInput: {
+    flex: 1, minWidth: 0, textAlign: 'center', padding: '7px 0', fontSize: '14px', fontWeight: '700',
+    color: '#FFFFFF', backgroundColor: 'rgba(8,15,40,0.7)', border: '1px solid rgba(160,190,255,0.3)',
+    borderRadius: '4px', outline: 'none',
   },
   buyBtn: {
-    border: 'none', borderRadius: '10px', padding: '10px 16px', color: '#0A0A0B',
-    fontSize: '12px', fontWeight: '800',
+    width: '100%', border: 'none', borderRadius: '4px', padding: '10px 6px', color: '#0B1430',
+    fontSize: '12px', fontWeight: '800', background: 'linear-gradient(180deg, #E4EEFF, #A9C4FF)',
   },
   logoutBtn: {
-    backgroundColor: 'transparent', border: '1px solid #26262B', color: '#8A8A93',
-    padding: '5px 12px', borderRadius: '8px', fontSize: '11px', cursor: 'pointer',
+    backgroundColor: 'transparent', border: '1px solid rgba(160,190,255,0.3)', color: '#CFE0FF',
+    padding: '5px 12px', borderRadius: '4px', fontSize: '11px', cursor: 'pointer',
   },
   resultBox: {
-    width: '100%', padding: '13px', backgroundColor: '#0A0A0B', border: '1px solid',
-    borderRadius: '12px', textAlign: 'center', fontSize: '13px', fontWeight: '700',
+    width: '100%', maxWidth: '420px', padding: '13px', backgroundColor: 'rgba(8,15,40,0.7)', border: '1px solid',
+    borderRadius: '4px', textAlign: 'center', fontSize: '13px', fontWeight: '700',
     marginTop: '14px', boxSizing: 'border-box', animation: 'fadeUp .3s ease both',
   },
   historyRow: {
     display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px',
-    padding: '12px', marginBottom: '8px', backgroundColor: '#1B1B1F',
-    border: '1px solid #26262B', borderRadius: '12px', fontSize: '13px',
-  },
-  itemCard: {
-    width: '100%', backgroundColor: '#1B1B1F', border: '1px solid #26262B',
-    borderRadius: '14px', padding: '14px', display: 'flex', justifyContent: 'space-between',
-    alignItems: 'center', boxSizing: 'border-box',
+    padding: '12px', marginBottom: '8px', backgroundColor: 'rgba(40,62,130,0.4)',
+    border: '1px solid rgba(160,190,255,0.22)', borderRadius: '4px', fontSize: '13px',
   },
 };
