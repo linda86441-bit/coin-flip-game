@@ -13,6 +13,10 @@ import {
   where, 
   getDocs, 
   runTransaction,
+  writeBatch,
+  orderBy,
+  limit,
+  startAfter,
   serverTimestamp
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
@@ -27,6 +31,39 @@ const errMsg = (e) =>
   e && e.code === 'resource-exhausted'
     ? '접속자가 많아 지금은 처리할 수 없어요. 잠시 후 다시 시도해 주세요.'
     : (e && e.message) || '알 수 없는 오류가 발생했어요.';
+
+// 내역 한 줄에 보여줄 문구/값/색상
+const historyView = (h, myUid) => {
+  const sent = h.fromUid === myUid;
+  const qty = h.qty || 1;
+  const gold = `${(h.amount || 0).toLocaleString()} G`;
+  switch (h.type) {
+    case 'buy':
+      return { label: `🛒 ${h.item} ×${qty} 구매`, value: h.amount > 0 ? `-${gold}` : '무료', color: '#CFE0FF' };
+    case 'flip':
+      return {
+        label: h.amount > 0 ? '🎲 동전 던지기 · 승리' : '🎲 동전 던지기 · 패배',
+        value: `${h.amount > 0 ? '+' : '-'}${Math.abs(h.amount || 0).toLocaleString()} G`,
+        color: h.amount > 0 ? '#FBBF24' : '#FF4D6D',
+      };
+    case 'use':
+      return { label: `✓ ${h.item} 사용`, value: `-${h.item} ×${qty}`, color: '#9DB0D6' };
+    case 'grant':
+      return { label: sent ? `🎁 ${h.toId}에게 포인트 지급` : '🎁 포인트 지급', value: `+${gold}`, color: '#FBBF24' };
+    case 'item':
+      return {
+        label: sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`,
+        value: `${sent ? '-' : '+'}${h.item} ×${qty}`,
+        color: sent ? '#FF4D6D' : '#CFE0FF',
+      };
+    default: // 'gold'
+      return {
+        label: sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`,
+        value: `${sent ? '-' : '+'}${gold}`,
+        color: sent ? '#FF4D6D' : '#CFE0FF',
+      };
+  }
+};
 
 // 하루에 주어지는 동전 던지기 횟수
 const DAILY_GAMES = 5;
@@ -239,12 +276,25 @@ export default function App() {
         try {
           const userDocRef = doc(db, 'users', user.uid);
           const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
-          await setDoc(userDocRef, {
+          // 게임 결과와 내역을 한 번에 저장 (관리자는 골드 변화가 없어서 내역을 남기지 않음)
+          const batch = writeBatch(db);
+          batch.set(userDocRef, {
             userId: displayId,
             gold: newGold,
             remainingGames: newRemainingGames,
             lastPlayDate: today
           }, { merge: true });
+          if (!isAdmin) {
+            batch.set(doc(collection(db, 'transfers')), {
+              type: 'flip',
+              uids: [user.uid],
+              fromUid: user.uid,
+              fromId: displayId,
+              amount: newGold - gold, // 이기면 +, 지면 -
+              createdAt: serverTimestamp()
+            });
+          }
+          await batch.commit();
         } catch (error) {
           console.error('동전 던지기 저장 실패:', error);
           alert(`저장에 실패해서 이번 게임은 기록되지 않았어요.\n${errMsg(error)}`);
@@ -279,11 +329,24 @@ export default function App() {
       try {
         const userDocRef = doc(db, 'users', user.uid);
         const displayId = user.email ? decodeURIComponent(user.email.split('@')[0]) : '';
-        await setDoc(userDocRef, {
+        // 골드/아이템 변경과 구매 내역을 한 번에 저장 (둘 다 성공하거나 둘 다 실패)
+        const batch = writeBatch(db);
+        batch.set(userDocRef, {
           userId: displayId,
           gold: newGold,
           inventory: newInventory
         }, { merge: true });
+        batch.set(doc(collection(db, 'transfers')), {
+          type: 'buy',
+          uids: [user.uid],
+          fromUid: user.uid,
+          fromId: displayId,
+          item: item.name,
+          qty,
+          amount: isAdmin ? 0 : totalPrice,
+          createdAt: serverTimestamp()
+        });
+        await batch.commit();
       } catch (error) {
         console.error('구매 저장 실패:', error);
         alert(`구매에 실패했어요. 골드는 차감되지 않았어요.\n${errMsg(error)}`);
@@ -348,6 +411,7 @@ export default function App() {
         transaction.update(targetDocRef, { gold: newTargetGold });
         transaction.set(doc(collection(db, 'transfers')), {
           type: isAdmin ? 'grant' : 'gold',
+          uids: [user.uid, targetDoc.id],
           fromUid: user.uid,
           fromId: currentDisplayId,
           toUid: targetDoc.id,
@@ -431,6 +495,7 @@ export default function App() {
         transaction.update(targetDocRef, { inventory: newTargetInv });
         transaction.set(logRef, {
           type: 'item',
+          uids: [user.uid, targetDoc.id],
           fromUid: user.uid,
           fromId: currentDisplayId,
           toUid: targetDoc.id,
@@ -474,6 +539,7 @@ export default function App() {
         transaction.update(myDocRef, { inventory: newInv, lastLogId: logRef.id });
         transaction.set(logRef, {
           type: 'use',
+          uids: [user.uid],
           fromUid: user.uid,
           fromId: currentDisplayId,
           item: itemName,
@@ -493,33 +559,44 @@ export default function App() {
   const setQty = (id, v) =>
     setBuyQty((prev) => ({ ...prev, [id]: Math.min(99, Math.max(1, Math.floor(v) || 1)) }));
 
-  // 양도 내역
+  // 내역 (최근 20건씩 불러오고, 더보기로 이어서 불러옴)
+  const HISTORY_PAGE = 20;
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState(false);
+  const [historyMoreLoading, setHistoryMoreLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [historyCursor, setHistoryCursor] = useState(null);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
   const [sidePanel, setSidePanel] = useState('info'); // 'info' | 'history'
 
-  const loadHistory = async () => {
+  const loadHistory = async (more = false) => {
     if (!user) return;
-    setHistoryLoading(true);
-    setHistoryError(false);
+    if (more) setHistoryMoreLoading(true);
+    else setHistoryLoading(true);
+    setHistoryError('');
     try {
-      const [sent, received] = await Promise.all([
-        getDocs(query(collection(db, 'transfers'), where('fromUid', '==', user.uid))),
-        getDocs(query(collection(db, 'transfers'), where('toUid', '==', user.uid))),
-      ]);
-      const list = [...sent.docs, ...received.docs].map((d) => ({ id: d.id, ...d.data() }));
-      list.sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-      setHistory(list.slice(0, 50));
+      const constraints = [
+        where('uids', 'array-contains', user.uid),
+        orderBy('createdAt', 'desc'),
+      ];
+      if (more && historyCursor) constraints.push(startAfter(historyCursor));
+      constraints.push(limit(HISTORY_PAGE));
+
+      const snap = await getDocs(query(collection(db, 'transfers'), ...constraints));
+      const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setHistory((prev) => (more ? [...prev, ...rows] : rows));
+      setHistoryCursor(snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : historyCursor);
+      setHistoryHasMore(snap.docs.length === HISTORY_PAGE);
     } catch (error) {
-      console.error('양도 내역 불러오기 실패:', error);
-      setHistoryError(true);
+      console.error('내역 불러오기 실패:', error);
+      setHistoryError(error && error.code === 'failed-precondition' ? 'index' : 'error');
     }
     setHistoryLoading(false);
+    setHistoryMoreLoading(false);
   };
 
   useEffect(() => {
-    if (sidePanel === 'history') loadHistory();
+    if (sidePanel === 'history') loadHistory(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidePanel, user]);
 
@@ -651,30 +728,38 @@ export default function App() {
             {historyLoading ? (
               <p style={{ ...styles.subText, textAlign: 'center' }}>불러오는 중...</p>
             ) : historyError ? (
-              <p style={{ ...styles.subText, textAlign: 'center', color: '#FF4D6D' }}>
-                내역을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.
+              <p style={{ ...styles.subText, textAlign: 'center', color: '#FF4D6D', lineHeight: 1.6 }}>
+                {historyError === 'index'
+                  ? '내역을 보려면 관리자의 초기 설정(색인 만들기)이 필요해요.'
+                  : '내역을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.'}
               </p>
             ) : history.length === 0 ? (
               <p style={{ ...styles.subText, textAlign: 'center' }}>내역이 없습니다.</p>
             ) : (
               history.map((h) => {
-                const sent = h.fromUid === user.uid;
-                const what = h.type === 'item' || h.type === 'use' ? `${h.item} ×${h.qty || 1}` : `${(h.amount || 0).toLocaleString()} G`;
+                const view = historyView(h, user.uid);
                 const when = h.createdAt?.toDate
                   ? h.createdAt.toDate().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
                   : '';
                 return (
                   <div key={h.id} style={styles.historyRow}>
                     <div>
-                      <div style={{ fontWeight: '700', color: h.type === 'grant' ? '#FBBF24' : h.type === 'use' ? '#9DB0D6' : sent ? '#FF4D6D' : '#CFE0FF' }}>
-                        {h.type === 'use' ? `✓ ${h.item} 사용` : h.type === 'grant' ? (sent ? `🎁 ${h.toId}에게 포인트 지급` : '🎁 포인트 지급') : sent ? `→ ${h.toId}에게 보냄` : `← ${h.fromId}에게 받음`}
-                      </div>
+                      <div style={{ fontWeight: '700', color: view.color }}>{view.label}</div>
                       <div style={{ fontSize: '11px', color: '#9DB0D6', marginTop: '2px' }}>{when}</div>
                     </div>
-                    <div style={{ fontWeight: '800' }}>{sent && h.type !== 'grant' ? '-' : '+'}{what}</div>
+                    <div style={{ fontWeight: '800' }}>{view.value}</div>
                   </div>
                 );
               })
+            )}
+            {!historyLoading && !historyError && historyHasMore && (
+              <button
+                onClick={() => loadHistory(true)}
+                disabled={historyMoreLoading}
+                style={{ ...styles.subTabBtn, width: '100%', flex: 'none', marginTop: '4px', opacity: historyMoreLoading ? 0.6 : 1 }}
+              >
+                {historyMoreLoading ? '불러오는 중...' : '더보기'}
+              </button>
             )}
           </div>
         )}
