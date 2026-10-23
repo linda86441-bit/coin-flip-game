@@ -3,7 +3,6 @@
 // 필요한 설정: Vercel 환경변수 FIREBASE_SERVICE_ACCOUNT = 서비스 계정 키 JSON 파일의 전체 내용
 const crypto = require('crypto');
 const { initializeApp, getApps, cert } = require('firebase-admin/app');
-const { getAuth } = require('firebase-admin/auth');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 const DAILY_GAMES = 5;
@@ -13,10 +12,41 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
+let projectId = '';
 function init() {
   if (getApps().length) return;
   if (!process.env.FIREBASE_SERVICE_ACCOUNT) throw new HttpError(500, '서버 설정이 아직 끝나지 않았어요. (FIREBASE_SERVICE_ACCOUNT)');
-  initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+  const key = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  projectId = key.project_id;
+  initializeApp({ credential: cert(key) });
+}
+
+// 로그인 확인: firebase-admin 의 인증 모듈(jwks-rsa/jose 충돌) 대신, 구글이 공개한 인증서로 직접 검증합니다.
+let certCache = { certs: null, exp: 0 };
+async function getCerts() {
+  if (certCache.certs && Date.now() < certCache.exp) return certCache.certs;
+  const r = await fetch('https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com');
+  if (!r.ok) throw new Error('인증서를 가져오지 못했어요.');
+  const certs = await r.json();
+  const m = /max-age=(\d+)/.exec(r.headers.get('cache-control') || '');
+  certCache = { certs, exp: Date.now() + (m ? Number(m[1]) : 3600) * 1000 };
+  return certs;
+}
+async function verifyIdToken(token) {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('bad token');
+  const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+  const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+  if (header.alg !== 'RS256') throw new Error('bad alg');
+  const cert = (await getCerts())[header.kid];
+  if (!cert) throw new Error('unknown kid');
+  const ok = crypto.createVerify('RSA-SHA256').update(`${parts[0]}.${parts[1]}`).verify(cert, Buffer.from(parts[2], 'base64url'));
+  if (!ok) throw new Error('bad signature');
+  const now = Math.floor(Date.now() / 1000);
+  if (!(payload.exp > now) || payload.iat > now + 300) throw new Error('expired');
+  if (payload.aud !== projectId || payload.iss !== `https://securetoken.google.com/${projectId}`) throw new Error('wrong project');
+  if (typeof payload.sub !== 'string' || !payload.sub) throw new Error('no sub');
+  return payload.sub;
 }
 
 module.exports = async (req, res) => {
@@ -28,7 +58,7 @@ module.exports = async (req, res) => {
     const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
     if (!m) throw new HttpError(401, '로그인이 필요해요.');
     let uid;
-    try { uid = (await getAuth().verifyIdToken(m[1])).uid; }
+    try { uid = await verifyIdToken(m[1]); }
     catch (e) { throw new HttpError(401, '로그인 정보가 만료됐어요. 새로고침 후 다시 로그인해 주세요.'); }
 
     // 2) 입력 검사
